@@ -83,18 +83,23 @@ export default function TemplatesPage() {
                 ) : null}
               </div>
 
-              <div className="border-t border-white/5 pt-4">
-                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Configured Steps ({tpl.steps?.length || 0})</h4>
-                <div className="flex flex-wrap gap-2">
-                  {tpl.steps?.map((step: any) => (
-                    <div key={step.id} className="bg-slate-950/40 border border-white/5 px-2.5 py-1 rounded-lg text-xs flex items-center gap-1.5">
-                      <span className="bg-indigo-500/20 text-indigo-400 w-4 h-4 rounded-full flex items-center justify-center font-bold text-[9px]">{step.sequence}</span>
-                      <span className="text-slate-300 font-medium">
-                        {step.assignee_user_id ? `User ID: ${step.assignee_user_id}` : step.assignee_role}
-                      </span>
-                    </div>
-                  ))}
+              <div className="border-t border-white/5 pt-4 flex justify-between items-end">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Configured Steps ({tpl.steps?.length || 0})</h4>
+                  <div className="flex flex-wrap gap-2">
+                    {tpl.steps?.map((step: any) => (
+                      <div key={step.id} className="bg-slate-950/40 border border-white/5 px-2.5 py-1 rounded-lg text-xs flex items-center gap-1.5">
+                        <span className="bg-indigo-500/20 text-indigo-400 w-4 h-4 rounded-full flex items-center justify-center font-bold text-[9px]">{step.sequence}</span>
+                        <span className="text-slate-300 font-medium">
+                          {step.assignee_user_id ? `User ID: ${step.assignee_user_id}` : step.assignee_role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
+                <Link href={`/templates/${tpl.id}`} className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center gap-1 shrink-0 pb-1">
+                  Details →
+                </Link>
               </div>
             </div>
           ))}

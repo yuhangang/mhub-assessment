@@ -52,7 +52,6 @@ export default function Navbar() {
     { href: '/', label: 'Overview' },
     { href: '/templates', label: 'Configuration' },
     { href: '/trigger', label: 'Run Process' },
-    { href: '/inbox', label: 'Inbox Simulator' },
   ];
 
   return (

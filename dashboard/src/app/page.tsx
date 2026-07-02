@@ -5,15 +5,25 @@ import { apiFetch } from '@/lib/api';
 export default function DashboardOverview() {
   const [instances, setInstances] = useState<any[]>([]);
   const [bookings, setBookings] = useState<any[]>([]);
-  const [activeTab, setActiveTab] = useState<'instances' | 'bookings'>('instances');
+  const [inboxItems, setInboxItems] = useState<any[]>([]);
+  const [agents, setAgents] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'instances' | 'inbox' | 'bookings'>('instances');
   const [stats, setStats] = useState({ total: 0, pending: 0, progress: 0, approved: 0, rejected: 0 });
   const [selectedInstance, setSelectedInstance] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
+  const [inboxError, setInboxError] = useState('');
+  const [inboxComment, setInboxComment] = useState('');
+  const [formData, setFormData] = useState<Record<string, Record<string, string>>>({});
 
   const loadData = async () => {
     try {
       setLoading(true);
+      // Fetch agents first to map active agent and role
+      const agentsData = await apiFetch('/agents');
+      setAgents(agentsData);
+
+      // Fetch workflow instances
       const data = await apiFetch('/all-instances');
       setInstances(data);
       
@@ -37,9 +47,17 @@ export default function DashboardOverview() {
         }
       }
 
-      // Fetch bookings for the quick trigger tab
+      // Fetch bookings for the quick start tab
       const bookingsData = await apiFetch('/bookings');
       setBookings(bookingsData);
+
+      // Fetch inbox items for active agent
+      const savedAgentId = localStorage.getItem('simulated_agent_id');
+      const activeAgent = agentsData.find((a: any) => a.id.toString() === savedAgentId) || agentsData[0];
+      if (activeAgent) {
+        const inboxData = await apiFetch(`/inbox?user_id=${activeAgent.id}&role=${activeAgent.role}`);
+        setInboxItems(inboxData);
+      }
     } catch (err: any) {
       console.error(err);
     } finally {
@@ -100,8 +118,74 @@ export default function DashboardOverview() {
     }
   };
 
+  const handleInboxAction = async (item: any, action: 'approve' | 'reject') => {
+    setInboxError('');
+    setMessage('');
+    if (action === 'reject' && (!inboxComment || inboxComment.trim() === '')) {
+      setInboxError('Comments are required for step rejection.');
+      return;
+    }
+
+    // Extract submitted_data for data_entry step types
+    let submittedData: any = undefined;
+    if (action === 'approve' && item.step_type === 'data_entry') {
+      let configObj: any = null;
+      try {
+        configObj = JSON.parse(item.config || '{}');
+      } catch (e) {}
+
+      if (configObj?.fields) {
+        const itemData = formData[item.id] || {};
+        for (const field of configObj.fields) {
+          if (field.required && !itemData[field.name]) {
+            setInboxError(`Field "${field.label}" is required.`);
+            return;
+          }
+        }
+        submittedData = itemData;
+      }
+    }
+
+    try {
+      const savedAgentId = localStorage.getItem('simulated_agent_id') || '1';
+      const path = `/instances/${item.instance_id}/steps/${item.id}/${action}`;
+      await apiFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: parseInt(savedAgentId),
+          comment: inboxComment || undefined,
+          submitted_data: submittedData
+        })
+      });
+
+      setMessage(`Step successfully ${action === 'approve' ? 'submitted/approved' : 'rejected'}!`);
+      setInboxComment('');
+      
+      // Clear form data for this step
+      setFormData(prev => {
+        const copy = { ...prev };
+        delete copy[item.id];
+        return copy;
+      });
+
+      // Reload all overview data (which updates active instances, sidebar details, and inbox count)
+      await loadData();
+      
+      setTimeout(() => setMessage(''), 4000);
+    } catch (err: any) {
+      setInboxError(err.message);
+    }
+  };
+
   useEffect(() => {
     loadData();
+
+    const handleGlobalChange = () => {
+      loadData();
+    };
+    window.addEventListener('simulated-agent-changed', handleGlobalChange);
+    return () => window.removeEventListener('simulated-agent-changed', handleGlobalChange);
   }, []);
 
   return (
@@ -156,7 +240,22 @@ export default function DashboardOverview() {
                     : 'text-slate-400 hover:text-white hover:bg-white/5'
                 }`}
               >
-                Workflow Instances
+                Active Workflows
+              </button>
+              <button 
+                onClick={() => setActiveTab('inbox')}
+                className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all cursor-pointer flex items-center gap-2 ${
+                  activeTab === 'inbox' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                <span>My Inbox</span>
+                {inboxItems.length > 0 && (
+                  <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-4 h-4 flex items-center justify-center">
+                    {inboxItems.length}
+                  </span>
+                )}
               </button>
               <button 
                 onClick={() => setActiveTab('bookings')}
@@ -166,7 +265,7 @@ export default function DashboardOverview() {
                     : 'text-slate-400 hover:text-white hover:bg-white/5'
                 }`}
               >
-                Quick Trigger Booking
+                Quick Start
               </button>
             </div>
             
@@ -179,7 +278,7 @@ export default function DashboardOverview() {
             <p className="text-slate-400">Loading details...</p>
           ) : activeTab === 'instances' ? (
             instances.length === 0 ? (
-              <p className="text-slate-400">No active instances. Go to 'Quick Trigger Booking' to trigger one.</p>
+              <p className="text-slate-400">No active instances. Go to 'Quick Start' to trigger one.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -216,6 +315,105 @@ export default function DashboardOverview() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )
+          ) : activeTab === 'inbox' ? (
+            // Embedded Inbox Simulator Tab
+            inboxItems.length === 0 ? (
+              <p className="text-slate-500 text-sm">No pending approvals for your simulated profile. Trigger a workflow or switch roleplay agents.</p>
+            ) : (
+              <div className="space-y-6">
+                {inboxError && (
+                  <div className="bg-rose-500/10 border border-rose-500/30 text-rose-400 p-4 rounded-lg text-sm font-medium">
+                    {inboxError}
+                  </div>
+                )}
+                {inboxItems.map(item => {
+                  let configObj: any = null;
+                  if (item.config) {
+                    try {
+                      configObj = JSON.parse(item.config);
+                    } catch(e) {}
+                  }
+
+                  return (
+                    <div key={item.id} className="bg-slate-950/40 p-5 rounded-xl border border-white/5 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                      <div className="space-y-2 flex-1">
+                        <div className="flex gap-2 items-center">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                            item.step_type === 'data_entry' ? 'bg-indigo-500/20 text-indigo-400' : 'bg-amber-500/20 text-amber-400'
+                          }`}>
+                            {item.step_type === 'data_entry' ? 'Data Entry Needed' : 'Awaiting Approval'}
+                          </span>
+                          <span className="text-xs text-slate-500">Instance #{item.instance_id} - Step {item.sequence}</span>
+                        </div>
+                        <h4 className="text-base font-bold text-white">{item.template_name}</h4>
+                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-slate-400 pt-1 pb-1">
+                          <p>Entity: <span className="text-slate-300 capitalize">{item.entity_type} ID: {item.entity_id}</span></p>
+                          {item.source_entity && (
+                            <>
+                              <p>Buyer: <span className="text-slate-300">{item.source_entity.buyer_name || 'N/A'}</span></p>
+                              <p>Project: <span className="text-slate-300">{item.source_entity.project_name || 'N/A'}</span></p>
+                              <p>Unit: <span className="text-slate-300">{item.source_entity.unit_number || 'N/A'}</span></p>
+                              <p>Price: <span className="text-slate-300">${(item.source_entity.price || 0).toLocaleString()}</span></p>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Dynamic Data Entry Form Fields */}
+                        {item.step_type === 'data_entry' && configObj?.fields && (
+                          <div className="space-y-3 p-4 bg-slate-900/40 rounded-lg border border-white/5 mt-3 max-w-md">
+                            <span className="text-[10px] text-teal-400 font-bold uppercase tracking-wider">Required Data Entry Fields</span>
+                            {configObj.fields.map((field: any) => (
+                              <div key={field.name} className="space-y-1">
+                                <label className="text-xs text-slate-300 font-medium">{field.label}</label>
+                                <input
+                                  type={field.type === 'number' ? 'number' : 'text'}
+                                  placeholder={`Enter ${field.label}...`}
+                                  value={formData[item.id]?.[field.name] || ''}
+                                  onChange={(e) => {
+                                    setFormData({
+                                      ...formData,
+                                      [item.id]: {
+                                        ...(formData[item.id] || {}),
+                                        [field.name]: e.target.value
+                                      }
+                                    });
+                                  }}
+                                  className="w-full bg-slate-950 border border-white/10 rounded-lg px-3 py-2 text-xs text-white focus:border-indigo-500 outline-none"
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Actions Column */}
+                      <div className="space-y-3 w-full md:w-80">
+                        <textarea
+                          placeholder={item.step_type === 'data_entry' ? "Optional notes/comments..." : "Comment (Mandatory on rejection)..."}
+                          value={inboxComment} onChange={e => setInboxComment(e.target.value)}
+                          rows={2}
+                          className="w-full bg-slate-950 border border-white/10 rounded-lg p-2.5 text-xs text-white focus:border-indigo-500 outline-none"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleInboxAction(item, 'approve')}
+                            className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold transition-all cursor-pointer shadow-md"
+                          >
+                            {item.step_type === 'data_entry' ? 'Submit Data' : 'Approve'}
+                          </button>
+                          <button
+                            onClick={() => handleInboxAction(item, 'reject')}
+                            className="flex-1 py-2 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-lg text-xs font-semibold transition-all cursor-pointer"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )
           ) : (

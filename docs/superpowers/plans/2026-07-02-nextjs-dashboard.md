@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create a Next.js App Router admin dashboard styled with Tailwind CSS v4 that connects to the Express/SQLite backend to configure templates, trigger new workflow instances, view live database states, and action steps (Approve/Reject) using a simulated inbox.
+**Goal:** Create a Next.js App Router admin dashboard styled with Tailwind CSS v4 that connects to the Express/SQLite backend to configure versioned templates, trigger new workflow instances, view live database states, and action steps (Approve/Reject) using a simulated inbox.
 
 **Architecture:** A separate Next.js project will run on port `3001` and call the Express backend on port `3000`. The Express backend will be updated to support CORS and expose read/write endpoints for templates, instances, agents, bookings, units, and database resets.
 
@@ -27,6 +27,7 @@
 
 **Interfaces:**
 - Produces: `GET /api/agents`, `GET /api/bookings`, `GET /api/units`, `GET /api/events`, `GET /api/templates`, `GET /api/instances`, `POST /api/db/reset`
+- Template responses should include `version` and `previous_template_id`, and instance responses should include pinned `template_version`.
 
 - [ ] **Step 1: Write the failing tests**
   Create `tests/dashboard.test.ts`:
@@ -97,7 +98,7 @@
   });
 
   router.get('/all-templates', (req: Request, res: Response) => {
-    const templates = db.prepare('SELECT * FROM workflow_templates ORDER BY id DESC').all() as any[];
+    const templates = db.prepare('SELECT * FROM workflow_templates ORDER BY trigger_event ASC, version DESC, id DESC').all() as any[];
     const enhancedTemplates = templates.map(t => {
       const steps = db.prepare('SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC').all(t.id);
       return { ...t, is_active: Boolean(t.is_active), steps };
@@ -107,7 +108,7 @@
 
   router.get('/all-instances', (req: Request, res: Response) => {
     const instances = db.prepare(`
-      SELECT wi.*, wt.name as template_name, wt.trigger_event, a.name as initiator_name
+      SELECT wi.*, wt.name as template_name, wt.trigger_event, wt.version as template_version, a.name as initiator_name
       FROM workflow_instances wi
       JOIN workflow_templates wt ON wi.template_id = wt.id
       JOIN agents a ON wi.initiated_by = a.id
@@ -207,6 +208,7 @@
 - Create: `dashboard/src/lib/api.ts`
 - Modify: `dashboard/src/app/globals.css` (custom design tokens)
 - Modify: `dashboard/src/app/layout.tsx` (navigation layout, dark-mode styling)
+- Modify: `dashboard/src/app/templates/page.tsx` (surface template versions and predecessor links)
 
 - [ ] **Step 1: Define styling design system**
   Add google fonts and import variables in `dashboard/src/app/globals.css`:

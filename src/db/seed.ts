@@ -113,7 +113,7 @@ export async function runSeed() {
   ]);
   const templateId = template.lastInsertRowid;
 
-  console.log(`Seeded Template: Booking Cancellation Workflow (ID: ${templateId}, Active: 1)`);
+  console.log(`Seeded Template: Booking Cancellation Workflow (ID: ${templateId}, Version: 1, Active: 1)`);
 
   // Step 1: Assigned to Role "sales_manager"
   await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [templateId, 1, null, 'sales_manager', 'approval', null]);
@@ -132,7 +132,7 @@ export async function runSeed() {
   ]);
   const refundTemplateId = refundTemplate.lastInsertRowid;
 
-  console.log(`Seeded Template: Refund Processing Workflow (ID: ${refundTemplateId}, Active: 1)`);
+  console.log(`Seeded Template: Refund Processing Workflow (ID: ${refundTemplateId}, Version: 1, Active: 1)`);
 
   // Seed Steps for the Refund Processing Workflow
   // Step 1: Data Entry by Sales Coordinator (Alice)

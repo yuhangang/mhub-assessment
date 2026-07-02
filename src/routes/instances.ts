@@ -99,7 +99,7 @@ export const getInbox = async (req: Request, res: Response) => {
     let steps: any[] = [];
     if (user_id && role) {
       steps = await db.query(`
-        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
+        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event, wt.version as template_version
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
         JOIN workflow_templates wt ON wi.template_id = wt.id
@@ -110,7 +110,7 @@ export const getInbox = async (req: Request, res: Response) => {
       `, [user_id.toString(), role.toString()]);
     } else if (user_id) {
       steps = await db.query(`
-        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
+        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event, wt.version as template_version
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
         JOIN workflow_templates wt ON wi.template_id = wt.id
@@ -120,7 +120,7 @@ export const getInbox = async (req: Request, res: Response) => {
       `, [user_id.toString()]);
     } else if (role) {
       steps = await db.query(`
-        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
+        SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event, wt.version as template_version
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
         JOIN workflow_templates wt ON wi.template_id = wt.id
@@ -156,7 +156,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
 
   const instance = await db.queryOne(`
-    SELECT wi.*, wt.name as template_name, wt.trigger_event, a.name as initiator_name, a.email as initiator_email
+    SELECT wi.*, wt.name as template_name, wt.trigger_event, wt.version as template_version, a.name as initiator_name, a.email as initiator_email
     FROM workflow_instances wi
     JOIN workflow_templates wt ON wi.template_id = wt.id
     JOIN agents a ON wi.initiated_by = a.id
@@ -191,6 +191,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     id: instance.id,
     template_id: instance.template_id,
     template_name: instance.template_name,
+    template_version: instance.template_version,
     trigger_event: instance.trigger_event,
     status: instance.status,
     entity_type: instance.entity_type,

@@ -55,7 +55,12 @@ export default function TemplatesPage() {
             <div key={tpl.id} className="bg-slate-900/60 backdrop-blur-md border border-white/5 rounded-2xl p-6 space-y-4 hover:border-indigo-500/20 transition-all flex flex-col justify-between">
               <div className="space-y-2">
                 <div className="flex justify-between items-start">
-                  <h3 className="text-lg font-bold text-white">{tpl.name}</h3>
+                  <div>
+                    <h3 className="text-lg font-bold text-white">{tpl.name}</h3>
+                    <p className="text-[11px] uppercase tracking-[0.24em] text-slate-500 mt-1">
+                      Version {tpl.version}
+                    </p>
+                  </div>
                   <button
                     onClick={() => handleToggleStatus(tpl.id, tpl.is_active)}
                     className={`px-3 py-1 rounded-full text-xs font-semibold transition-all cursor-pointer ${
@@ -71,6 +76,11 @@ export default function TemplatesPage() {
                 <div className="text-xs text-slate-500">
                   Trigger Event: <span className="font-mono text-teal-400">{tpl.trigger_event}</span>
                 </div>
+                {tpl.previous_template_id ? (
+                  <div className="text-xs text-slate-500">
+                    Based on template ID <span className="font-mono text-slate-300">{tpl.previous_template_id}</span>
+                  </div>
+                ) : null}
               </div>
 
               <div className="border-t border-white/5 pt-4">

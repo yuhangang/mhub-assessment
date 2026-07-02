@@ -49,10 +49,13 @@ CREATE TABLE IF NOT EXISTS workflow_templates (
     name TEXT NOT NULL,
     description TEXT,
     trigger_event TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1 CHECK(version > 0),
+    previous_template_id INTEGER,
     is_active INTEGER DEFAULT 0 CHECK(is_active IN (0, 1)),
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (trigger_event) REFERENCES workflow_events(name) ON DELETE RESTRICT
+    FOREIGN KEY (trigger_event) REFERENCES workflow_events(name) ON DELETE RESTRICT,
+    FOREIGN KEY (previous_template_id) REFERENCES workflow_templates(id) ON DELETE RESTRICT
 );
 
 -- Partial index for active template triggers (ensuring only one active template per trigger)

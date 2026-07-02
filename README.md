@@ -118,6 +118,8 @@ erDiagram
         string name
         string description
         string trigger_event FK
+        int version
+        int previous_template_id FK "Nullable"
         int is_active "0 or 1"
         datetime created_at
         datetime updated_at
@@ -129,6 +131,8 @@ erDiagram
         int sequence "sequence > 0"
         int assignee_user_id FK "Nullable"
         string assignee_role "Nullable"
+        string step_type "approval | data_entry | automated"
+        string config "Nullable JSON text"
         datetime created_at
     }
 
@@ -169,26 +173,29 @@ erDiagram
 
 ### Written Explanation & Design Rationale
 
-1. **Separation of Template Configuration and Runtime State**: 
+1. **Separation of Template Configuration and Runtime State**:
    Static layouts (`workflow_templates` and `workflow_template_steps`) are cleanly separated from instances and steps runtime state. Once an instance is triggered, it duplicates the template steps into `workflow_instance_steps` to ensure that future changes to the template do not corrupt running workflows.
-2. **Polymorphic Source References**:
+2. **Immutable Template Versioning**:
+   Templates are append-only versions. Updating a template creates a new `workflow_templates` row with an incremented `version` and a `previous_template_id` pointer to the prior version. Existing instances stay pinned to the exact template version they started with, while new instances use the newly activated version.
+3. **Polymorphic Source References**:
    `workflow_instances` holds `entity_type` (e.g. `'booking'`, `'unit'`) and `entity_id` (representing the primary key) to dynamically bind workflow instances to any entity type in the property sales system.
-3. **Database Integrity & Explicit Assignees**:
+4. **Database Integrity, Step Types & Explicit Assignees**:
    Instead of storing assignee IDs as weak strings, we split assignees into `assignee_user_id` (foreign key to `agents.id`) and `assignee_role`. A database `CHECK` constraint guarantees that exactly one is populated at any time:
    `CHECK ((assignee_user_id IS NOT NULL AND assignee_role IS NULL) OR (assignee_user_id IS NULL AND assignee_role IS NOT NULL))`.
    We validate roles at both template and instance levels using check constraints:
    `CHECK (assignee_role IN ('sales_manager', 'finance_manager', 'sales_coordinator') OR assignee_role IS NULL)`.
-4. **Complete Audit Trail**:
+   `step_type` and `config` are stored on both template steps and instance steps so data-entry and automated behaviors are preserved when a template version is copied into runtime state.
+5. **Complete Audit Trail**:
    `workflow_step_decisions` records the final approval or rejection decision for each actioned step, including actor, timestamp, decision, and comment.
-5. **Predefined Events**:
+6. **Predefined Events**:
    Predefined workflow triggers are managed via the `workflow_events` lookup table. This is extensible and prevents templates from registering to invalid events.
-6. **No Floating Point Ambiguity**:
+7. **No Floating Point Ambiguity**:
    Property prices are stored as `price_cents` integers in SQLite rather than `DECIMAL` to prevent precision errors.
-7. **Domain Delete Restricting**:
+8. **Domain Delete Restricting**:
    In production, booking associations use `ON DELETE RESTRICT` (instead of `ON DELETE CASCADE`) to preserve transactional audit trails.
-8. **SQLite Triggers**:
+9. **SQLite Triggers**:
    Added SQLite `AFTER UPDATE` triggers on `workflow_templates`, `workflow_instances`, and `workflow_instance_steps` to automatically update `updated_at` timestamps on row updates.
-9. **Strict Sequential Enforcer Unique Index**:
+10. **Strict Sequential Enforcer Unique Index**:
    A partial unique index `idx_one_awaiting_step_per_instance` ensures that at most one step in any workflow instance is set to `'awaiting_action'` at any time.
 
 ---
@@ -196,7 +203,7 @@ erDiagram
 ### Questions & Answers
 
 #### Q1: How does your design handle the case where a user's role changes mid-workflow — does the step re-assign, or is it locked to whoever it was assigned to at instance creation?
-- **Answer**: Runtime workflow steps are copied from the workflow template when an instance is created. This means each workflow instance keeps a stable snapshot of the approval route even if the template is later edited. User-specific steps are locked to the selected `assignee_user_id`. Role-based steps are locked to the role name through `assignee_role`, so any user currently holding that role may act on the step.
+- **Answer**: Runtime workflow steps are copied from the workflow template version when an instance is created. This means each workflow instance keeps a stable snapshot of the approval route even if a newer template version is published later. User-specific steps are locked to the selected `assignee_user_id`. Role-based steps are locked to the role name through `assignee_role`, so any user currently holding that role may act on the step.
 
 #### Q2: What database-level or application-level mechanism prevents two approvers from acting on the same step simultaneously?
 - **Answer**: Step approval and rejection are performed inside a transaction using a conditional update: `UPDATE workflow_instance_steps SET status = ?, version = version + 1 WHERE id = ? AND status = 'awaiting_action' AND version = ?`. If the affected row count is zero, the step was already actioned or is no longer actionable, so the API returns `409 Conflict`. This prevents two role approvers from approving the same step simultaneously.
@@ -215,20 +222,22 @@ erDiagram
 
 ### 1. Template Management
 - **Create Template**: `POST /api/templates`
-  - Body: `{ name, description, trigger_event, is_active, steps: [{ sequence, assignee_role, assignee_user_id }] }`
+  - Body: `{ name, description, trigger_event, is_active, steps: [{ sequence, assignee_role, assignee_user_id, step_type, config }] }`
   - Enforces trigger event uniqueness (only one active template per trigger event).
 - **Retrieve Template**: `GET /api/templates/:id`
 - **Update Template**: `PUT /api/templates/:id`
-  - Blocks updates if there are pending or in-progress instances running against it.
+  - Creates a new immutable template version instead of mutating the old row.
+  - Existing instances remain pinned to the previous version; future instances use the new active version.
 - **Toggle Template Status**: `PATCH /api/templates/:id/status`
   - Body: `{ is_active: 0 | 1 }`
+  - Activating a version automatically deactivates any other active version for the same trigger event.
 
 ### 2. Instances & Inbox
 - **Trigger Instance**: `POST /api/instances`
   - Body: `{ event_name, entity_type, entity_id, initiated_by }`
   - Enforces duplicate prevention (blocks creation if an active instance already exists for that entity).
 - **Retrieve Instance State & History**: `GET /api/instances/:id`
-  - Returns the instance status, Polymorphic source entity data, steps state, and the full step audit trail.
+  - Returns the instance status, pinned `template_version`, polymorphic source entity data, steps state, and the full step audit trail.
 - **Approver Inbox**: `GET /api/inbox`
   - Query Params: `?user_id=1&role=sales_manager`
   - Returns actionable steps assigned to user ID 1 OR the sales_manager role.

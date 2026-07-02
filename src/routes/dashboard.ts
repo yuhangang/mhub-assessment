@@ -51,9 +51,14 @@ router.get('/events', async (req: Request, res: Response) => {
 
 router.get('/all-templates', async (req: Request, res: Response) => {
   try {
-    const templates = await db.query('SELECT * FROM workflow_templates ORDER BY id DESC') as any[];
+    const templates = await db.query(
+      'SELECT * FROM workflow_templates ORDER BY trigger_event ASC, version DESC, id DESC'
+    ) as any[];
     const enhancedTemplates = await Promise.all(templates.map(async t => {
-      const steps = await db.query('SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC', [t.id]);
+      const steps = await db.query(
+        'SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC',
+        [t.id]
+      );
       return { ...t, is_active: Boolean(t.is_active), steps };
     }));
     res.json(enhancedTemplates);
@@ -65,7 +70,7 @@ router.get('/all-templates', async (req: Request, res: Response) => {
 router.get('/all-instances', async (req: Request, res: Response) => {
   try {
     const instances = await db.query(`
-      SELECT wi.*, wt.name as template_name, wt.trigger_event, a.name as initiator_name
+      SELECT wi.*, wt.name as template_name, wt.trigger_event, wt.version as template_version, a.name as initiator_name
       FROM workflow_instances wi
       JOIN workflow_templates wt ON wi.template_id = wt.id
       JOIN agents a ON wi.initiated_by = a.id

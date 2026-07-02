@@ -516,13 +516,13 @@ export default function DashboardOverview() {
                             step.step_type === 'automated' ? 'bg-teal-500/20 text-teal-400' :
                             'bg-slate-800 text-slate-400'
                           }`}>
-                            {step.step_type.replace('_', ' ')}
+                            {(step.step_type || 'approval').replace('_', ' ')}
                           </span>
                         </div>
                         <p className="text-xs text-slate-400 mt-0.5">
                           {step.step_type === 'automated'
                             ? 'Assignee: System Check'
-                            : `Assignee: ${step.assignee_user_id ? `User ID ${step.assignee_user_id}` : `Role ${step.assignee_role}`}`
+                            : `Assignee: ${step.assignee_user_id ? `User ID ${step.assignee_user_id}` : `Role ${step.assignee_role || 'approval'}`}`
                           }
                         </p>
                         <span className="text-[10px] uppercase font-bold text-slate-500 block mt-0.5">{step.status}</span>

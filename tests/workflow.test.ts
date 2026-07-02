@@ -78,7 +78,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(res.body.steps[0].assignee_role).toBe('sales_manager');
     });
 
-    test('PUT /api/templates/:id - permits updates if no instances are running', async () => {
+    test('PUT /api/templates/:id - creates a new template version for future instances', async () => {
       const payload = {
         name: 'Updated Name',
         description: 'New Description',
@@ -94,15 +94,32 @@ describe('Workflow Engine Technical Challenge Tests', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
+      expect(res.body).toHaveProperty('templateId');
+      expect(res.body.templateId).not.toBe(1);
 
-      const template = await db.queryOne('SELECT name, description FROM workflow_templates WHERE id = 1') as any;
-      expect(template.name).toBe('Updated Name');
-      expect(template.description).toBe('New Description');
+      const originalTemplate = await db.queryOne(
+        'SELECT id, name, description, is_active, version FROM workflow_templates WHERE id = 1'
+      ) as any;
+      const newTemplate = await db.queryOne(
+        'SELECT id, name, description, is_active, version, previous_template_id FROM workflow_templates WHERE id = ?',
+        [res.body.templateId]
+      ) as any;
+
+      expect(originalTemplate.name).toBe('Booking Cancellation Workflow');
+      expect(originalTemplate.description).toBe('Standard workflow for cancellation requests of booked properties');
+      expect(originalTemplate.is_active).toBe(0);
+      expect(originalTemplate.version).toBe(1);
+
+      expect(newTemplate.name).toBe('Updated Name');
+      expect(newTemplate.description).toBe('New Description');
+      expect(newTemplate.is_active).toBe(1);
+      expect(newTemplate.version).toBe(2);
+      expect(newTemplate.previous_template_id).toBe(1);
     });
 
-    test('PUT /api/templates/:id - blocks updates if instances are running', async () => {
+    test('PUT /api/templates/:id - allows updates while instances are running and keeps old instances pinned', async () => {
       // Trigger an instance first
-      await request(app)
+      const firstInstanceRes = await request(app)
         .post('/api/instances')
         .send({
           event_name: 'booking.cancellation_requested',
@@ -111,7 +128,8 @@ describe('Workflow Engine Technical Challenge Tests', () => {
           initiated_by: 1
         });
 
-      // Try updating
+      expect(firstInstanceRes.status).toBe(201);
+
       const payload = {
         name: 'Updated Name',
         trigger_event: 'booking.cancellation_requested',
@@ -124,8 +142,52 @@ describe('Workflow Engine Technical Challenge Tests', () => {
         .put('/api/templates/1')
         .send(payload);
 
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain('instances are currently running');
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      const originalInstance = await db.queryOne(
+        'SELECT template_id FROM workflow_instances WHERE id = ?',
+        [firstInstanceRes.body.instanceId]
+      ) as any;
+      const originalInstanceSteps = await db.query(
+        'SELECT sequence, assignee_role, assignee_user_id FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC',
+        [firstInstanceRes.body.instanceId]
+      ) as any[];
+
+      expect(originalInstance.template_id).toBe(1);
+      expect(originalInstanceSteps).toEqual([
+        { sequence: 1, assignee_role: 'sales_manager', assignee_user_id: null },
+        { sequence: 2, assignee_role: null, assignee_user_id: 3 }
+      ]);
+
+      await request(app)
+        .post('/api/instances/1/steps/1/approve')
+        .send({ user_id: 2, comment: 'Manager approves original flow' });
+
+      const secondInstanceRes = await request(app)
+        .post('/api/instances')
+        .send({
+          event_name: 'booking.cancellation_requested',
+          entity_type: 'booking',
+          entity_id: '2',
+          initiated_by: 1
+        });
+
+      expect(secondInstanceRes.status).toBe(201);
+
+      const secondInstance = await db.queryOne(
+        'SELECT template_id FROM workflow_instances WHERE id = ?',
+        [secondInstanceRes.body.instanceId]
+      ) as any;
+      const secondInstanceSteps = await db.query(
+        'SELECT sequence, assignee_role, assignee_user_id FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC',
+        [secondInstanceRes.body.instanceId]
+      ) as any[];
+
+      expect(secondInstance.template_id).toBe(res.body.templateId);
+      expect(secondInstanceSteps).toEqual([
+        { sequence: 1, assignee_role: 'sales_coordinator', assignee_user_id: null }
+      ]);
     });
   });
 

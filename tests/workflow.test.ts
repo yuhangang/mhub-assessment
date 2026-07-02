@@ -4,14 +4,14 @@ import db from '../src/db/connection';
 import { runSeed } from '../src/db/seed';
 
 describe('Workflow Engine Technical Challenge Tests', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     // Reset and seed the database before each test
-    runSeed();
+    await runSeed();
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     // Close DB connection
-    db.close();
+    await db.close();
   });
 
   describe('Part 2.1 — Template Management', () => {
@@ -36,13 +36,13 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(res.body).toHaveProperty('templateId');
 
       // Verify template exists in DB
-      const template = db.prepare('SELECT * FROM workflow_templates WHERE id = ?').get(res.body.templateId) as any;
+      const template = await db.queryOne('SELECT * FROM workflow_templates WHERE id = ?', [res.body.templateId]) as any;
       expect(template.name).toBe('New Custom Workflow');
       expect(template.description).toBe('Verifies price updates');
       expect(template.is_active).toBe(1);
 
       // Verify steps
-      const steps = db.prepare('SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC').all(res.body.templateId) as any[];
+      const steps = await db.query('SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC', [res.body.templateId]) as any[];
       expect(steps.length).toBe(2);
       expect(steps[0].assignee_role).toBe('finance_manager');
       expect(steps[0].assignee_user_id).toBeNull();
@@ -95,7 +95,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
 
-      const template = db.prepare('SELECT name, description FROM workflow_templates WHERE id = 1').get() as any;
+      const template = await db.queryOne('SELECT name, description FROM workflow_templates WHERE id = 1') as any;
       expect(template.name).toBe('Updated Name');
       expect(template.description).toBe('New Description');
     });
@@ -145,14 +145,14 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(res.body).toHaveProperty('instanceId');
 
       // Verify instance status in DB (should be 'in_progress')
-      const instance = db.prepare('SELECT * FROM workflow_instances WHERE id = ?').get(res.body.instanceId) as any;
+      const instance = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [res.body.instanceId]) as any;
       expect(instance.status).toBe('in_progress');
       expect(instance.entity_type).toBe('booking');
       expect(instance.entity_id).toBe('1');
       expect(instance.initiated_by).toBe(1);
 
       // Verify step statuses (Step 1 -> awaiting_action, Step 2 -> pending)
-      const steps = db.prepare('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC').all(res.body.instanceId) as any[];
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [res.body.instanceId]) as any[];
       expect(steps.length).toBe(2);
       expect(steps[0].sequence).toBe(1);
       expect(steps[0].status).toBe('awaiting_action');
@@ -226,7 +226,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       const instanceId = triggerRes.body.instanceId;
 
       // Get steps to find IDs
-      const steps = db.prepare('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC').all(instanceId) as any[];
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
       const step1Id = steps[0].id;
       const step2Id = steps[1].id;
 
@@ -243,7 +243,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(approve1Res.status).toBe(200);
 
       // Verify audit decision created
-      const decisions = db.prepare('SELECT * FROM workflow_step_decisions WHERE instance_id = ?').all(instanceId) as any[];
+      const decisions = await db.query('SELECT * FROM workflow_step_decisions WHERE instance_id = ?', [instanceId]) as any[];
       expect(decisions.length).toBe(1);
       expect(decisions[0].step_id).toBe(step1Id);
       expect(decisions[0].decision).toBe('approved');
@@ -251,7 +251,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(decisions[0].comment).toBe('Manager approves');
 
       // Verify step 2 is now awaiting_action
-      const step2 = db.prepare('SELECT status FROM workflow_instance_steps WHERE id = ?').get(step2Id) as any;
+      const step2 = await db.queryOne('SELECT status FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
       expect(step2.status).toBe('awaiting_action');
 
       // Charlie (ID: 3, role finance_manager) is assigned explicitly as user_id 3 on step 2.
@@ -271,7 +271,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(instanceRes.body.audit_trail[1].agent_name).toBe('Charlie Finance');
 
       // Verify Callback executed
-      const booking = db.prepare('SELECT status, unit_id FROM bookings WHERE id = 1').get() as any;
+      const booking = await db.queryOne('SELECT status, unit_id FROM bookings WHERE id = 1') as any;
       expect(booking.status).toBe('cancelled');
     });
 
@@ -286,7 +286,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
         });
 
       const instanceId = triggerRes.body.instanceId;
-      const step1Id = (db.prepare('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1').get(instanceId) as any).id;
+      const step1Id = (await db.queryOne('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1', [instanceId]) as any).id;
 
       // Reject step 1 (Bob, ID 2, sales_manager)
       const rejectRes = await request(app)
@@ -296,13 +296,13 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(rejectRes.status).toBe(200);
 
       // Verify step is rejected in decisions
-      const decisions = db.prepare('SELECT * FROM workflow_step_decisions WHERE step_id = ?').all(step1Id) as any[];
+      const decisions = await db.query('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step1Id]) as any[];
       expect(decisions.length).toBe(1);
       expect(decisions[0].decision).toBe('rejected');
       expect(decisions[0].comment).toBe('Booking cannot be cancelled');
 
       // Verify instance status is 'rejected'
-      const instance = db.prepare('SELECT status FROM workflow_instances WHERE id = ?').get(instanceId) as any;
+      const instance = await db.queryOne('SELECT status FROM workflow_instances WHERE id = ?', [instanceId]) as any;
       expect(instance.status).toBe('rejected');
     });
 
@@ -317,7 +317,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
         });
 
       const instanceId = triggerRes.body.instanceId;
-      const step1Id = (db.prepare('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1').get(instanceId) as any).id;
+      const step1Id = (await db.queryOne('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1', [instanceId]) as any).id;
 
       const [res1, res2] = await Promise.all([
         request(app).post(`/api/instances/${instanceId}/steps/${step1Id}/approve`).send({ user_id: 2, comment: 'Approver A' }),
@@ -342,7 +342,7 @@ describe('Workflow Engine Technical Challenge Tests', () => {
         });
 
       const instanceId = triggerRes.body.instanceId;
-      const steps = db.prepare('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC').all(instanceId) as any[];
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
       const step1Id = steps[0].id;
       const step2Id = steps[1].id;
 
@@ -365,12 +365,12 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(approveRes1.status).toBe(200);
 
       // Verify db changes
-      const step1 = db.prepare('SELECT status, version FROM workflow_instance_steps WHERE id = ?').get(step1Id) as any;
+      const step1 = await db.queryOne('SELECT status, version FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
       expect(step1.status).toBe('approved');
       expect(step1.version).toBe(1);
 
       // Verify decisions log
-      const decision = db.prepare('SELECT * FROM workflow_step_decisions WHERE step_id = ?').get(step1Id) as any;
+      const decision = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step1Id]) as any;
       expect(decision.decision).toBe('approved');
       expect(decision.comment).toBe('Bob approves via review endpoint');
     });

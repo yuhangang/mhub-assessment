@@ -8,7 +8,7 @@ const router = Router();
  * 1. POST /api/instances - Trigger a new workflow instance
  * Request body: { event_name, entity_type, entity_id, initiated_by }
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const { event_name, entity_type, entity_id, initiated_by } = req.body;
 
   if (!event_name || !event_name.trim()) {
@@ -28,19 +28,19 @@ router.post('/', (req: Request, res: Response) => {
 
   // Verify the entity actually exists
   if (entity_type === 'booking') {
-    const booking = db.prepare('SELECT id FROM bookings WHERE id = ?').get(entity_id);
+    const booking = await db.queryOne('SELECT id FROM bookings WHERE id = ?', [entity_id]);
     if (!booking) {
       return res.status(404).json({ error: `Booking with ID ${entity_id} does not exist` });
     }
   } else if (entity_type === 'unit') {
-    const unit = db.prepare('SELECT id FROM units WHERE id = ?').get(entity_id);
+    const unit = await db.queryOne('SELECT id FROM units WHERE id = ?', [entity_id]);
     if (!unit) {
       return res.status(404).json({ error: `Unit with ID ${entity_id} does not exist` });
     }
   }
 
   try {
-    const instanceId = WorkflowEngine.triggerInstance(event_name, entity_type, entity_id.toString(), initiatorId);
+    const instanceId = await WorkflowEngine.triggerInstance(event_name, entity_type, entity_id.toString(), initiatorId);
     return res.status(201).json({
       success: true,
       message: 'Workflow instance started successfully',
@@ -52,27 +52,27 @@ router.post('/', (req: Request, res: Response) => {
   }
 });
 
-function fetchSourceEntity(entityType: string, entityId: string): any {
+async function fetchSourceEntity(entityType: string, entityId: string): Promise<any> {
   try {
     if (entityType === 'booking') {
-      const booking = db.prepare(`
+      const booking = await db.queryOne(`
         SELECT b.*, u.unit_number, u.price_cents, p.name as project_name 
         FROM bookings b 
         JOIN units u ON b.unit_id = u.id 
         JOIN projects p ON u.project_id = p.id 
         WHERE b.id = ?
-      `).get(entityId) as any;
+      `, [entityId]) as any;
       if (booking) {
         booking.price = booking.price_cents / 100;
       }
       return booking;
     } else if (entityType === 'unit') {
-      const unit = db.prepare(`
+      const unit = await db.queryOne(`
         SELECT u.*, p.name as project_name 
         FROM units u 
         JOIN projects p ON u.project_id = p.id 
         WHERE u.id = ?
-      `).get(entityId) as any;
+      `, [entityId]) as any;
       if (unit) {
         unit.price = unit.price_cents / 100;
       }
@@ -88,7 +88,7 @@ function fetchSourceEntity(entityType: string, entityId: string): any {
  * 3. GET /api/inbox - Fetch all steps awaiting action for a user or role
  * Query parameters: user_id (optional), role (optional)
  */
-export const getInbox = (req: Request, res: Response) => {
+export const getInbox = async (req: Request, res: Response) => {
   const { user_id, role } = req.query;
 
   if (!user_id && !role) {
@@ -98,7 +98,7 @@ export const getInbox = (req: Request, res: Response) => {
   try {
     let steps: any[] = [];
     if (user_id && role) {
-      steps = db.prepare(`
+      steps = await db.query(`
         SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
@@ -107,9 +107,9 @@ export const getInbox = (req: Request, res: Response) => {
           wis.assignee_user_id = ? OR wis.assignee_role = ?
         )
         ORDER BY wis.created_at DESC
-      `).all(user_id.toString(), role.toString());
+      `, [user_id.toString(), role.toString()]);
     } else if (user_id) {
-      steps = db.prepare(`
+      steps = await db.query(`
         SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
@@ -117,9 +117,9 @@ export const getInbox = (req: Request, res: Response) => {
         WHERE wis.status = 'awaiting_action' AND wi.status = 'in_progress' AND
           wis.assignee_user_id = ?
         ORDER BY wis.created_at DESC
-      `).all(user_id.toString());
+      `, [user_id.toString()]);
     } else if (role) {
-      steps = db.prepare(`
+      steps = await db.query(`
         SELECT wis.*, wi.entity_type, wi.entity_id, wt.name as template_name, wt.trigger_event
         FROM workflow_instance_steps wis
         JOIN workflow_instances wi ON wis.instance_id = wi.id
@@ -127,16 +127,18 @@ export const getInbox = (req: Request, res: Response) => {
         WHERE wis.status = 'awaiting_action' AND wi.status = 'in_progress' AND
           wis.assignee_role = ?
         ORDER BY wis.created_at DESC
-      `).all(role.toString());
+      `, [role.toString()]);
     }
 
     // Enhance steps with source entity info
-    const enhancedSteps = steps.map(step => {
-      return {
-        ...step,
-        source_entity: fetchSourceEntity(step.entity_type, step.entity_id)
-      };
-    });
+    const enhancedSteps = await Promise.all(
+      steps.map(async (step) => {
+        return {
+          ...step,
+          source_entity: await fetchSourceEntity(step.entity_type, step.entity_id)
+        };
+      })
+    );
 
     return res.json(enhancedSteps);
   } catch (error: any) {
@@ -150,40 +152,40 @@ router.get('/inbox', getInbox);
 /**
  * 2. GET /api/instances/:id - Retrieve the current state and audit trail history
  */
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  const instance = db.prepare(`
+  const instance = await db.queryOne(`
     SELECT wi.*, wt.name as template_name, wt.trigger_event, a.name as initiator_name, a.email as initiator_email
     FROM workflow_instances wi
     JOIN workflow_templates wt ON wi.template_id = wt.id
     JOIN agents a ON wi.initiated_by = a.id
     WHERE wi.id = ?
-  `).get(id) as any;
+  `, [id]) as any;
 
   if (!instance) {
     return res.status(404).json({ error: `Workflow instance with ID ${id} not found` });
   }
 
   // Fetch current steps state
-  const steps = db.prepare(`
+  const steps = await db.query(`
     SELECT wis.*
     FROM workflow_instance_steps wis
     WHERE wis.instance_id = ?
     ORDER BY wis.sequence ASC
-  `).all(id);
+  `, [id]);
 
   // Fetch step decision audit history
-  const auditTrail = db.prepare(`
+  const auditTrail = await db.query(`
     SELECT wsd.id, wsd.step_id, wsd.decision, wsd.comment, wsd.actioned_at, 
            a.id as agent_id, a.name as agent_name, a.email as agent_email
     FROM workflow_step_decisions wsd
     JOIN agents a ON wsd.actioned_by = a.id
     WHERE wsd.instance_id = ?
     ORDER BY wsd.actioned_at ASC
-  `).all(id);
+  `, [id]);
 
-  const sourceEntity = fetchSourceEntity(instance.entity_type, instance.entity_id);
+  const sourceEntity = await fetchSourceEntity(instance.entity_type, instance.entity_id);
 
   return res.json({
     id: instance.id,
@@ -209,7 +211,7 @@ router.get('/:id', (req: Request, res: Response) => {
 /**
  * 4. POST /api/instances/:id/steps/:stepId/approve - Approve a step
  */
-router.post('/:id/steps/:stepId/approve', (req: Request, res: Response) => {
+router.post('/:id/steps/:stepId/approve', async (req: Request, res: Response) => {
   const instanceId = parseInt(req.params.id);
   const stepId = parseInt(req.params.stepId);
   const { user_id, comment } = req.body;
@@ -222,7 +224,7 @@ router.post('/:id/steps/:stepId/approve', (req: Request, res: Response) => {
   }
 
   try {
-    WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'approved', comment);
+    await WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'approved', comment);
     return res.json({ success: true, message: 'Step approved successfully' });
   } catch (error: any) {
     console.error('Error approving step:', error);
@@ -239,7 +241,7 @@ router.post('/:id/steps/:stepId/approve', (req: Request, res: Response) => {
 /**
  * 5. POST /api/instances/:id/steps/:stepId/reject - Reject a step
  */
-router.post('/:id/steps/:stepId/reject', (req: Request, res: Response) => {
+router.post('/:id/steps/:stepId/reject', async (req: Request, res: Response) => {
   const instanceId = parseInt(req.params.id);
   const stepId = parseInt(req.params.stepId);
   const { user_id, comment } = req.body;
@@ -255,7 +257,7 @@ router.post('/:id/steps/:stepId/reject', (req: Request, res: Response) => {
   }
 
   try {
-    WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'rejected', comment);
+    await WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'rejected', comment);
     return res.json({ success: true, message: 'Step rejected successfully' });
   } catch (error: any) {
     console.error('Error rejecting step:', error);

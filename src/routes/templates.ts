@@ -20,7 +20,7 @@ interface TemplateInput {
 /**
  * Validate steps: ordered, starting from 1, contiguous, and exactly one assignee field populated
  */
-function validateSteps(steps: StepInput[]): string | null {
+async function validateSteps(steps: StepInput[]): Promise<string | null> {
   if (!Array.isArray(steps) || steps.length === 0) {
     return 'Steps must be a non-empty array';
   }
@@ -46,7 +46,7 @@ function validateSteps(steps: StepInput[]): string | null {
     }
 
     if (hasUser) {
-      const userExists = db.prepare('SELECT id FROM agents WHERE id = ?').get(step.assignee_user_id);
+      const userExists = await db.queryOne('SELECT id FROM agents WHERE id = ?', [step.assignee_user_id]);
       if (!userExists) {
         return `Step ${step.sequence} assignee_user_id (${step.assignee_user_id}) does not exist in agents`;
       }
@@ -66,7 +66,7 @@ function validateSteps(steps: StepInput[]): string | null {
 /**
  * 1. POST /api/templates - Create a new template with steps
  */
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   const { name, description = '', trigger_event, is_active = 0, steps } = req.body as TemplateInput;
 
   if (!name || !name.trim()) {
@@ -77,15 +77,16 @@ router.post('/', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Trigger event is required' });
   }
 
-  const stepsError = validateSteps(steps);
+  const stepsError = await validateSteps(steps);
   if (stepsError) {
     return res.status(400).json({ error: stepsError });
   }
 
   // Verify that the trigger event exists and is enabled
-  const event = db.prepare(
-    'SELECT is_enabled FROM workflow_events WHERE name = ?'
-  ).get(trigger_event) as { is_enabled: number } | undefined;
+  const event = await db.queryOne(
+    'SELECT is_enabled FROM workflow_events WHERE name = ?',
+    [trigger_event]
+  ) as { is_enabled: number } | undefined;
 
   if (!event) {
     return res.status(400).json({ error: `Trigger event '${trigger_event}' is not registered` });
@@ -99,9 +100,10 @@ router.post('/', (req: Request, res: Response) => {
       });
     }
 
-    const existing = db.prepare(
-      'SELECT id FROM workflow_templates WHERE trigger_event = ? AND is_active = 1'
-    ).get(trigger_event);
+    const existing = await db.queryOne(
+      'SELECT id FROM workflow_templates WHERE trigger_event = ? AND is_active = 1',
+      [trigger_event]
+    );
 
     if (existing) {
       return res.status(400).json({
@@ -111,34 +113,33 @@ router.post('/', (req: Request, res: Response) => {
   }
 
   try {
-    const runTx = db.transaction(() => {
-      const templateResult = db.prepare(
-        'INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)'
-      ).run(name, description, trigger_event, is_active);
-
-      const templateId = templateResult.lastInsertRowid as number;
-
-      const insertStep = db.prepare(
-        'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)'
+    const templateId = await db.transaction(async (tx) => {
+      const templateResult = await tx.execute(
+        'INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)',
+        [name, description, trigger_event, is_active]
       );
 
+      const newId = templateResult.lastInsertRowid as number;
+
       for (const step of steps) {
-        insertStep.run(
-          templateId,
-          step.sequence,
-          step.assignee_user_id !== undefined ? step.assignee_user_id : null,
-          step.assignee_role !== undefined ? step.assignee_role : null
+        await tx.execute(
+          'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)',
+          [
+            newId,
+            step.sequence,
+            step.assignee_user_id !== undefined ? step.assignee_user_id : null,
+            step.assignee_role !== undefined ? step.assignee_role : null
+          ]
         );
       }
 
-      return templateId;
+      return newId;
     });
 
-    const templateId = runTx();
     return res.status(201).json({ success: true, templateId });
   } catch (error: any) {
     console.error('Error creating template:', error);
-    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.code === '23505') {
       return res.status(400).json({
         error: `Conflict: Constraint violation. An active template might already be bound to trigger event '${trigger_event}'`
       });
@@ -150,20 +151,22 @@ router.post('/', (req: Request, res: Response) => {
 /**
  * 2. GET /api/templates/:id - Retrieve template details with steps
  */
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
 
-  const template = db.prepare(
-    'SELECT * FROM workflow_templates WHERE id = ?'
-  ).get(id) as any;
+  const template = await db.queryOne(
+    'SELECT * FROM workflow_templates WHERE id = ?',
+    [id]
+  ) as any;
 
   if (!template) {
     return res.status(404).json({ error: `Template with ID ${id} not found` });
   }
 
-  const steps = db.prepare(
-    'SELECT id, sequence, assignee_user_id, assignee_role, created_at FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC'
-  ).all(id);
+  const steps = await db.query(
+    'SELECT id, sequence, assignee_user_id, assignee_role, created_at FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC',
+    [id]
+  );
 
   return res.json({
     ...template,
@@ -176,7 +179,7 @@ router.get('/:id', (req: Request, res: Response) => {
  * 3. PUT /api/templates/:id - Update template details and steps
  * Permitted only when no running (pending or in_progress) instances are bound to this template.
  */
-router.put('/:id', (req: Request, res: Response) => {
+router.put('/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { name, description = '', trigger_event, steps } = req.body as TemplateInput;
 
@@ -188,22 +191,23 @@ router.put('/:id', (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Trigger event is required' });
   }
 
-  const stepsError = validateSteps(steps);
+  const stepsError = await validateSteps(steps);
   if (stepsError) {
     return res.status(400).json({ error: stepsError });
   }
 
   // Verify that the trigger event exists
-  const event = db.prepare(
-    'SELECT is_enabled FROM workflow_events WHERE name = ?'
-  ).get(trigger_event) as { is_enabled: number } | undefined;
+  const event = await db.queryOne(
+    'SELECT is_enabled FROM workflow_events WHERE name = ?',
+    [trigger_event]
+  ) as { is_enabled: number } | undefined;
 
   if (!event) {
     return res.status(400).json({ error: `Trigger event '${trigger_event}' is not registered` });
   }
 
   // Fetch template
-  const template = db.prepare('SELECT * FROM workflow_templates WHERE id = ?').get(id) as any;
+  const template = await db.queryOne('SELECT * FROM workflow_templates WHERE id = ?', [id]) as any;
   if (!template) {
     return res.status(404).json({ error: `Template with ID ${id} not found` });
   }
@@ -216,11 +220,11 @@ router.put('/:id', (req: Request, res: Response) => {
   }
 
   // Check if there are any running/pending instances against this template
-  const activeCountResult = db.prepare(`
+  const activeCountResult = await db.queryOne(`
     SELECT COUNT(*) as count 
     FROM workflow_instances 
     WHERE template_id = ? AND status IN ('pending', 'in_progress')
-  `).get(id) as { count: number };
+  `, [id]) as { count: number };
 
   if (activeCountResult.count > 0) {
     return res.status(400).json({
@@ -229,37 +233,35 @@ router.put('/:id', (req: Request, res: Response) => {
   }
 
   try {
-    const runTx = db.transaction(() => {
+    await db.transaction(async (tx) => {
       // Update template details
-      db.prepare(`
+      await tx.execute(`
         UPDATE workflow_templates 
         SET name = ?, description = ?, trigger_event = ?, updated_at = CURRENT_TIMESTAMP 
         WHERE id = ?
-      `).run(name, description, trigger_event, id);
+      `, [name, description, trigger_event, id]);
 
       // Remove existing steps
-      db.prepare('DELETE FROM workflow_template_steps WHERE template_id = ?').run(id);
+      await tx.execute('DELETE FROM workflow_template_steps WHERE template_id = ?', [id]);
 
       // Insert new steps
-      const insertStep = db.prepare(
-        'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)'
-      );
-
       for (const step of steps) {
-        insertStep.run(
-          id,
-          step.sequence,
-          step.assignee_user_id !== undefined ? step.assignee_user_id : null,
-          step.assignee_role !== undefined ? step.assignee_role : null
+        await tx.execute(
+          'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)',
+          [
+            id,
+            step.sequence,
+            step.assignee_user_id !== undefined ? step.assignee_user_id : null,
+            step.assignee_role !== undefined ? step.assignee_role : null
+          ]
         );
       }
     });
 
-    runTx();
     return res.json({ success: true, message: 'Template updated successfully' });
   } catch (error: any) {
     console.error('Error updating template:', error);
-    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE' || error.code === '23505') {
       return res.status(400).json({
         error: `Conflict: An active template is already bound to trigger event '${trigger_event}'`
       });
@@ -271,7 +273,7 @@ router.put('/:id', (req: Request, res: Response) => {
 /**
  * 4. PATCH /api/templates/:id/status - Toggle is_active
  */
-router.patch('/:id/status', (req: Request, res: Response) => {
+router.patch('/:id/status', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { is_active } = req.body;
 
@@ -282,16 +284,17 @@ router.patch('/:id/status', (req: Request, res: Response) => {
   const activeVal = is_active ? 1 : 0;
 
   // Fetch template
-  const template = db.prepare('SELECT * FROM workflow_templates WHERE id = ?').get(id) as any;
+  const template = await db.queryOne('SELECT * FROM workflow_templates WHERE id = ?', [id]) as any;
   if (!template) {
     return res.status(404).json({ error: `Template with ID ${id} not found` });
   }
 
   // If activating, check if another active template is already bound to this trigger event or if the trigger event is disabled
   if (activeVal === 1) {
-    const event = db.prepare(
-      'SELECT is_enabled FROM workflow_events WHERE name = ?'
-    ).get(template.trigger_event) as { is_enabled: number } | undefined;
+    const event = await db.queryOne(
+      'SELECT is_enabled FROM workflow_events WHERE name = ?',
+      [template.trigger_event]
+    ) as { is_enabled: number } | undefined;
 
     if (!event || event.is_enabled !== 1) {
       return res.status(400).json({
@@ -299,9 +302,10 @@ router.patch('/:id/status', (req: Request, res: Response) => {
       });
     }
 
-    const existing = db.prepare(
-      'SELECT id FROM workflow_templates WHERE trigger_event = ? AND is_active = 1 AND id != ?'
-    ).get(template.trigger_event, id) as { id: number } | undefined;
+    const existing = await db.queryOne(
+      'SELECT id FROM workflow_templates WHERE trigger_event = ? AND is_active = 1 AND id != ?',
+      [template.trigger_event, id]
+    ) as { id: number } | undefined;
 
     if (existing) {
       return res.status(400).json({
@@ -311,9 +315,10 @@ router.patch('/:id/status', (req: Request, res: Response) => {
   }
 
   try {
-    db.prepare(
-      'UPDATE workflow_templates SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
-    ).run(activeVal, id);
+    await db.execute(
+      'UPDATE workflow_templates SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+      [activeVal, id]
+    );
 
     return res.json({ success: true, is_active: Boolean(activeVal) });
   } catch (error: any) {

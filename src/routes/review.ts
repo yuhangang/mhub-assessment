@@ -20,7 +20,7 @@ const router = Router();
  * 7. HTTP Response Codes: 400, 403, 404, 409, 200, 500.
  * 8. Portability: SQLite compatible CURRENT_TIMESTAMP.
  */
-router.post('/workflow-instances/:id/steps/:stepId/approve', (req: Request, res: Response) => {
+router.post('/workflow-instances/:id/steps/:stepId/approve', async (req: Request, res: Response) => {
   const instanceId = parseInt(req.params.id);
   const stepId = parseInt(req.params.stepId);
   const { user_id, comment } = req.body;
@@ -37,13 +37,14 @@ router.post('/workflow-instances/:id/steps/:stepId/approve', (req: Request, res:
   const userIdNum = parseInt(user_id);
 
   try {
-    const pendingCallback: { fn?: () => void } = {};
+    const pendingCallback: { fn?: () => void | Promise<void> } = {};
 
-    const runTx = db.transaction(() => {
+    const result = await db.transaction(async (tx) => {
       // 2. Fetch the step safely
-      const step = db.prepare(
-        'SELECT * FROM workflow_instance_steps WHERE id = ? AND instance_id = ?'
-      ).get(stepId, instanceId) as any;
+      const step = await tx.queryOne(
+        'SELECT * FROM workflow_instance_steps WHERE id = ? AND instance_id = ?',
+        [stepId, instanceId]
+      ) as any;
 
       if (!step) {
         return { status: 404, data: { error: 'Workflow step or instance not found' } };
@@ -58,9 +59,10 @@ router.post('/workflow-instances/:id/steps/:stepId/approve', (req: Request, res:
       }
 
       // 4. Fetch the actioning user/agent details for Authorization
-      const user = db.prepare(
-        'SELECT id, role FROM agents WHERE id = ?'
-      ).get(userIdNum) as { id: number; role: string } | undefined;
+      const user = await tx.queryOne(
+        'SELECT id, role FROM agents WHERE id = ?',
+        [userIdNum]
+      ) as { id: number; role: string } | undefined;
 
       if (!user) {
         return { status: 403, data: { error: 'User not found in system' } };
@@ -78,52 +80,54 @@ router.post('/workflow-instances/:id/steps/:stepId/approve', (req: Request, res:
       }
 
       // 6. Concurrency Control: Optimistic status and version update
-      const updateResult = db.prepare(`
+      const updateResult = await tx.execute(`
         UPDATE workflow_instance_steps 
         SET status = 'approved', version = version + 1, updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND status = 'awaiting_action' AND version = ?
-      `).run(stepId, step.version);
+      `, [stepId, step.version]);
 
       if (updateResult.changes === 0) {
         return { status: 409, data: { error: 'Concurrency Conflict: This step has already been actioned' } };
       }
 
       // 7. Audit Trail insertion
-      db.prepare(`
+      await tx.execute(`
         INSERT INTO workflow_step_decisions (step_id, instance_id, decision, actioned_by, comment)
         VALUES (?, ?, 'approved', ?, ?)
-      `).run(stepId, instanceId, userIdNum, comment || null);
+      `, [stepId, instanceId, userIdNum, comment || null]);
 
       // 8. Progress to next step or complete instance
-      const nextStep = db.prepare(`
+      const nextStep = await tx.queryOne(`
         SELECT * FROM workflow_instance_steps 
         WHERE instance_id = ? AND sequence > ? 
         ORDER BY sequence ASC LIMIT 1
-      `).get(instanceId, step.sequence) as any;
+      `, [instanceId, step.sequence]) as any;
 
       if (nextStep) {
         // Advance to next step
-        db.prepare(`
+        await tx.execute(`
           UPDATE workflow_instance_steps 
           SET status = 'awaiting_action', updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
-        `).run(nextStep.id);
+        `, [nextStep.id]);
       } else {
         // No next step -> Complete/Approve Instance
-        db.prepare(`
+        await tx.execute(`
           UPDATE workflow_instances 
           SET status = 'approved', updated_at = CURRENT_TIMESTAMP 
           WHERE id = ?
-        `).run(instanceId);
+        `, [instanceId]);
 
         // Retrieve instance details to run callbacks
-        const instance = db.prepare(
-          'SELECT template_id, entity_type, entity_id FROM workflow_instances WHERE id = ?'
-        ).get(instanceId) as { template_id: number; entity_type: string; entity_id: string };
+        const instance = await tx.queryOne(
+          'SELECT template_id, entity_type, entity_id FROM workflow_instances WHERE id = ?',
+          [instanceId]
+        ) as { template_id: number; entity_type: string; entity_id: string };
 
-        const template = db.prepare(
-          'SELECT trigger_event FROM workflow_templates WHERE id = ?'
-        ).get(instance.template_id) as { trigger_event: string };
+        const template = await tx.queryOne(
+          'SELECT trigger_event FROM workflow_templates WHERE id = ?',
+          [instance.template_id]
+        ) as { trigger_event: string };
 
         // Get post-approval callback
         const callback = WorkflowEngine.getCallback(instance.entity_type, template.trigger_event);
@@ -135,10 +139,8 @@ router.post('/workflow-instances/:id/steps/:stepId/approve', (req: Request, res:
       return { status: 200, data: { success: true } };
     });
 
-    const result = runTx();
-
     if (result.status === 200 && pendingCallback.fn) {
-      pendingCallback.fn();
+      await pendingCallback.fn();
     }
 
     return res.status(result.status).json(result.data);

@@ -15,7 +15,12 @@ export default function InboxPage() {
     try {
       const data = await apiFetch('/agents');
       setAgents(data);
-      if (data.length > 0) setSelectedAgentId(data[0].id.toString());
+      const saved = localStorage.getItem('simulated_agent_id');
+      if (saved && data.some((a: any) => a.id.toString() === saved)) {
+        setSelectedAgentId(saved);
+      } else if (data.length > 0) {
+        setSelectedAgentId(data[0].id.toString());
+      }
     } catch (e) {
       console.error(e);
     }
@@ -41,11 +46,26 @@ export default function InboxPage() {
 
   useEffect(() => {
     fetchAgents();
+
+    const handleGlobalChange = () => {
+      const saved = localStorage.getItem('simulated_agent_id');
+      if (saved) {
+        setSelectedAgentId(saved);
+      }
+    };
+    window.addEventListener('simulated-agent-changed', handleGlobalChange);
+    return () => window.removeEventListener('simulated-agent-changed', handleGlobalChange);
   }, []);
 
   useEffect(() => {
     fetchInbox(selectedAgentId);
   }, [selectedAgentId, agents]);
+
+  const handleAgentChangeLocally = (val: string) => {
+    setSelectedAgentId(val);
+    localStorage.setItem('simulated_agent_id', val);
+    window.dispatchEvent(new Event('simulated-agent-changed'));
+  };
 
   const handleAction = async (item: any, action: 'approve' | 'reject') => {
     setErrorMsg('');
@@ -95,7 +115,7 @@ export default function InboxPage() {
           )}
         </div>
         <select
-          value={selectedAgentId} onChange={e => setSelectedAgentId(e.target.value)}
+          value={selectedAgentId} onChange={e => handleAgentChangeLocally(e.target.value)}
           className="bg-slate-950 border border-white/10 rounded-lg px-4 py-2 text-sm text-white focus:border-indigo-500 outline-none"
         >
           {agents.map(ag => (

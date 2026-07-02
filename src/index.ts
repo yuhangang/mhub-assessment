@@ -31,10 +31,10 @@ app.use('/api', dashboardRouter);
 app.get('/api/inbox', getInbox);
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
   try {
     // Ping DB
-    db.prepare('SELECT 1').get();
+    await db.queryOne('SELECT 1');
     res.json({ status: 'OK', database: 'connected' });
   } catch (e) {
     res.status(500).json({ status: 'ERROR', database: 'disconnected' });

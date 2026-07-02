@@ -28,7 +28,14 @@ export default function TriggerWorkflowPage() {
 
         const agentsData = await apiFetch('/agents');
         setAgents(agentsData);
-        if (agentsData.length > 0) setInitiatedBy(agentsData[0].id.toString());
+        if (agentsData.length > 0) {
+          const saved = localStorage.getItem('simulated_agent_id');
+          if (saved && agentsData.some((a: any) => a.id.toString() === saved)) {
+            setInitiatedBy(saved);
+          } else {
+            setInitiatedBy(agentsData[0].id.toString());
+          }
+        }
       } catch (e) {
         console.error(e);
       } finally {
@@ -36,6 +43,17 @@ export default function TriggerWorkflowPage() {
       }
     };
     loadOptions();
+  }, []);
+
+  useEffect(() => {
+    const handleGlobalChange = () => {
+      const saved = localStorage.getItem('simulated_agent_id');
+      if (saved) {
+        setInitiatedBy(saved);
+      }
+    };
+    window.addEventListener('simulated-agent-changed', handleGlobalChange);
+    return () => window.removeEventListener('simulated-agent-changed', handleGlobalChange);
   }, []);
 
   const handleTrigger = async (e: React.FormEvent) => {

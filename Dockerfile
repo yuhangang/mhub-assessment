@@ -20,7 +20,7 @@ COPY package*.json ./
 RUN npm ci --only=production
 
 COPY --from=builder /app/dist ./dist
-COPY src/db/schema.sql ./dist/db/schema.sql
+COPY src/db/*.sql ./dist/db/
 
 # Seed and launch script
 EXPOSE 3000

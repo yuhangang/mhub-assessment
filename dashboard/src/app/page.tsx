@@ -4,6 +4,8 @@ import { apiFetch } from '@/lib/api';
 
 export default function DashboardOverview() {
   const [instances, setInstances] = useState<any[]>([]);
+  const [bookings, setBookings] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<'instances' | 'bookings'>('instances');
   const [stats, setStats] = useState({ total: 0, pending: 0, progress: 0, approved: 0, rejected: 0 });
   const [selectedInstance, setSelectedInstance] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
@@ -28,13 +30,16 @@ export default function DashboardOverview() {
         rejected: counts.rejected || 0
       });
       
-      // Keep selected instance data updated
       if (selectedInstance) {
         const updated = data.find((i: any) => i.id === selectedInstance.id);
         if (updated) {
           setSelectedInstance(updated);
         }
       }
+
+      // Fetch bookings for the quick trigger tab
+      const bookingsData = await apiFetch('/bookings');
+      setBookings(bookingsData);
     } catch (err: any) {
       console.error(err);
     } finally {
@@ -43,7 +48,7 @@ export default function DashboardOverview() {
   };
 
   const handleReset = async () => {
-    if (confirm('Are you sure you want to reset the SQLite database to its seed state?')) {
+    if (confirm('Are you sure you want to reset the database to its seed state?')) {
       try {
         await apiFetch('/db/reset', { method: 'POST' });
         setMessage('Database reset completed successfully.');
@@ -53,6 +58,45 @@ export default function DashboardOverview() {
       } catch (e: any) {
         alert('Failed to reset: ' + e.message);
       }
+    }
+  };
+
+  const handleQuickTrigger = async (bookingId: string) => {
+    setMessage('');
+    try {
+      const savedAgentId = localStorage.getItem('simulated_agent_id') || '1';
+      
+      const res = await apiFetch('/instances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_name: 'booking.cancellation_requested',
+          entity_type: 'booking',
+          entity_id: bookingId,
+          initiated_by: parseInt(savedAgentId)
+        })
+      });
+
+      setMessage(`Workflow instance successfully triggered for booking #${bookingId}!`);
+      
+      // Reload overview data
+      await loadData();
+      
+      // Auto-select the newly created instance
+      if (res.instanceId) {
+        const checkInstances = await apiFetch('/all-instances');
+        const newInst = checkInstances.find((i: any) => i.id === res.instanceId);
+        if (newInst) {
+          setSelectedInstance(newInst);
+        }
+      }
+      
+      // Switch back to instances tab
+      setActiveTab('instances');
+      
+      setTimeout(() => setMessage(''), 4000);
+    } catch (e: any) {
+      alert('Failed to trigger workflow: ' + e.message);
     }
   };
 
@@ -100,53 +144,128 @@ export default function DashboardOverview() {
       {/* List of Instances & Inspector Split */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-slate-900/60 backdrop-blur-md border border-white/5 rounded-2xl p-6">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold">Workflow Instances</h3>
+          
+          {/* Tab Selector Header */}
+          <div className="flex justify-between items-center border-b border-white/5 pb-4 mb-6">
+            <div className="flex gap-2">
+              <button 
+                onClick={() => setActiveTab('instances')}
+                className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                  activeTab === 'instances' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                Workflow Instances
+              </button>
+              <button 
+                onClick={() => setActiveTab('bookings')}
+                className={`px-4 py-2 text-sm font-semibold rounded-lg transition-all cursor-pointer ${
+                  activeTab === 'bookings' 
+                    ? 'bg-indigo-600 text-white shadow-md' 
+                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                Quick Trigger Booking
+              </button>
+            </div>
+            
             <button onClick={loadData} className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 flex items-center gap-1 cursor-pointer">
               Refresh
             </button>
           </div>
+
           {loading && instances.length === 0 ? (
-            <p className="text-slate-400">Loading instances...</p>
-          ) : instances.length === 0 ? (
-            <p className="text-slate-400">No active instances. Go to 'Run Process' to trigger one.</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="border-b border-white/5 text-slate-400 text-xs uppercase font-semibold">
-                    <th className="pb-3">ID</th>
-                    <th className="pb-3">Template</th>
-                    <th className="pb-3">Trigger Event</th>
-                    <th className="pb-3">Entity</th>
-                    <th className="pb-3">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/5">
-                  {instances.map((inst) => (
-                    <tr 
-                      key={inst.id} 
-                      onClick={() => setSelectedInstance(inst)}
-                      className={`hover:bg-indigo-500/5 cursor-pointer transition-colors ${selectedInstance?.id === inst.id ? 'bg-indigo-500/10' : ''}`}
-                    >
-                      <td className="py-4 font-semibold text-slate-300">#{inst.id}</td>
-                      <td className="py-4 text-white font-medium">{inst.template_name}</td>
-                      <td className="py-4 text-xs font-mono text-slate-400">{inst.trigger_event}</td>
-                      <td className="py-4 text-sm text-slate-300">{inst.entity_type} #{inst.entity_id}</td>
-                      <td className="py-4">
-                        <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
-                          inst.status === 'approved' ? 'bg-emerald-500/10 text-emerald-400' :
-                          inst.status === 'rejected' ? 'bg-rose-500/10 text-rose-400' :
-                          'bg-sky-500/10 text-sky-400'
-                        }`}>
-                          {inst.status}
-                        </span>
-                      </td>
+            <p className="text-slate-400">Loading details...</p>
+          ) : activeTab === 'instances' ? (
+            instances.length === 0 ? (
+              <p className="text-slate-400">No active instances. Go to 'Quick Trigger Booking' to trigger one.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/5 text-slate-400 text-xs uppercase font-semibold">
+                      <th className="pb-3">ID</th>
+                      <th className="pb-3">Template</th>
+                      <th className="pb-3">Trigger Event</th>
+                      <th className="pb-3">Entity</th>
+                      <th className="pb-3">Status</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {instances.map((inst) => (
+                      <tr 
+                        key={inst.id} 
+                        onClick={() => setSelectedInstance(inst)}
+                        className={`hover:bg-indigo-500/5 cursor-pointer transition-colors ${selectedInstance?.id === inst.id ? 'bg-indigo-500/10' : ''}`}
+                      >
+                        <td className="py-4 font-semibold text-slate-300">#{inst.id}</td>
+                        <td className="py-4 text-white font-medium">{inst.template_name}</td>
+                        <td className="py-4 text-xs font-mono text-slate-400">{inst.trigger_event}</td>
+                        <td className="py-4 text-sm text-slate-300">{inst.entity_type} #{inst.entity_id}</td>
+                        <td className="py-4">
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                            inst.status === 'approved' ? 'bg-emerald-500/10 text-emerald-400' :
+                            inst.status === 'rejected' ? 'bg-rose-500/10 text-rose-400' :
+                            'bg-sky-500/10 text-sky-400'
+                          }`}>
+                            {inst.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )
+          ) : (
+            // Bookings Quick Trigger Tab
+            bookings.length === 0 ? (
+              <p className="text-slate-500 text-sm">No bookings found in database.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/5 text-slate-400 text-xs uppercase font-semibold">
+                      <th className="pb-3">ID</th>
+                      <th className="pb-3">Buyer Name</th>
+                      <th className="pb-3">Project / Unit</th>
+                      <th className="pb-3">Status</th>
+                      <th className="pb-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5">
+                    {bookings.map((bk) => {
+                      const hasActiveInstance = instances.some(
+                        inst => inst.entity_type === 'booking' && inst.entity_id === bk.id.toString() && ['pending', 'in_progress'].includes(inst.status)
+                      );
+                      
+                      return (
+                        <tr key={bk.id} className="hover:bg-white/5 transition-colors">
+                          <td className="py-4 font-semibold text-slate-300">#{bk.id}</td>
+                          <td className="py-4 text-white font-medium">{bk.buyer_name}</td>
+                          <td className="py-4 text-sm text-slate-300">{bk.project_name} - Unit {bk.unit_number}</td>
+                          <td className="py-4 text-sm capitalize text-slate-400">{bk.status}</td>
+                          <td className="py-4 text-right">
+                            <button
+                              disabled={hasActiveInstance}
+                              onClick={() => handleQuickTrigger(bk.id.toString())}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                                hasActiveInstance 
+                                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
+                                  : 'bg-gradient-to-r from-indigo-500 to-teal-400 text-white hover:opacity-90 shadow-sm'
+                              }`}
+                            >
+                              {hasActiveInstance ? 'Active Workflow' : 'Trigger Cancellation'}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
           )}
         </div>
 

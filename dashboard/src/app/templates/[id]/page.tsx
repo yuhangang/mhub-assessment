@@ -20,7 +20,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
-  const [isLocked, setIsLocked] = useState(false);
+  const [hasActiveInstances, setHasActiveInstances] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
 
   // Form states
@@ -61,7 +61,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
           inst.template_id === templateId &&
           (inst.status === 'pending' || inst.status === 'in_progress')
       ).length;
-      setIsLocked(activeCount > 0);
+      setHasActiveInstances(activeCount > 0);
 
       // Fetch events and agents for edit options
       const eventsData = await apiFetch('/events');
@@ -140,10 +140,6 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isLocked) {
-      setError('Cannot update template: instances are currently running against it');
-      return;
-    }
     try {
       setError('');
       setSuccessMsg('');
@@ -159,7 +155,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
         })),
       };
 
-      await apiFetch(`/templates/${templateId}`, {
+      const res = await apiFetch(`/templates/${templateId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -167,7 +163,12 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
 
       setSuccessMsg('Template updated successfully!');
       setIsEditing(false);
-      loadData();
+      
+      if (res.templateId && res.templateId !== templateId) {
+        router.push(`/templates/${res.templateId}`);
+      } else {
+        loadData();
+      }
       setTimeout(() => setSuccessMsg(''), 4000);
     } catch (err: any) {
       setError(err.message);
@@ -205,12 +206,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
         {!isEditing ? (
           <button
             onClick={() => setIsEditing(true)}
-            disabled={isLocked}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all cursor-pointer ${
-              isLocked
-                ? 'bg-slate-800 text-slate-500 border border-white/5 cursor-not-allowed'
-                : 'bg-indigo-600 hover:bg-indigo-700 text-white'
-            }`}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-semibold transition-all cursor-pointer"
           >
             Edit Template
           </button>
@@ -260,11 +256,11 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
         </div>
       )}
 
-      {isLocked && (
-        <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 p-4 rounded-xl text-sm font-medium flex flex-col gap-1">
-          <span className="font-bold">Caution: Locked Template</span>
+      {hasActiveInstances && (
+        <div className="bg-amber-500/10 border border-amber-500/20 text-amber-400 p-4 rounded-xl text-sm font-medium flex flex-col gap-1 text-left">
+          <span className="font-bold">Active Instances Running</span>
           <span>
-            This template is currently locked and cannot be edited because there are live running workflow instances (`pending` or `in_progress`) associated with it.
+            This template currently has active running workflow instances (`pending` or `in_progress`). Saving changes will create a new version of the template. Existing running instances will continue to use the current version (v{template.version}), while new triggers will use the new version.
           </span>
         </div>
       )}
@@ -275,7 +271,7 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
           /* Read-Only State */
           <div className="space-y-6">
             <div className="flex justify-between items-start border-b border-white/5 pb-4">
-              <div>
+              <div className="text-left">
                 <h2 className="text-2xl font-bold text-white">{template.name}</h2>
                 <p className="text-[11px] uppercase tracking-[0.24em] text-slate-500 mt-1">
                   Version {template.version}
@@ -294,19 +290,19 @@ export default function TemplateDetailPage({ params }: { params: Promise<{ id: s
               </button>
             </div>
 
-            <div className="text-sm text-slate-300">
+            <div className="text-sm text-slate-300 text-left">
               Trigger Event: <span className="font-mono text-teal-400 bg-slate-950/40 px-2 py-1 rounded border border-white/5 ml-1">{template.trigger_event}</span>
             </div>
 
             {template.previous_template_id && (
-              <div className="text-xs text-slate-500">
+              <div className="text-xs text-slate-500 text-left">
                 Based on template ID: <span className="font-mono text-slate-300">{template.previous_template_id}</span>
               </div>
             )}
 
             {/* Steps Timeline Visual */}
             <div className="space-y-4 pt-4 border-t border-white/5">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Configured Step Sequence</h3>
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider text-left">Configured Step Sequence</h3>
               {steps.length === 0 ? (
                 <p className="text-slate-500 text-sm">No steps configured.</p>
               ) : (

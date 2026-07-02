@@ -1,8 +1,10 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import cors from 'cors';
 import templatesRouter from './routes/templates';
 import instancesRouter, { getInbox } from './routes/instances';
 import reviewRouter from './routes/review';
+import dashboardRouter from './routes/dashboard';
 import db from './db/connection';
 
 dotenv.config();
@@ -10,6 +12,7 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cors({ origin: 'http://localhost:3001' }));
 app.use(express.json());
 
 // Logger middleware
@@ -22,6 +25,7 @@ app.use((req, res, next) => {
 app.use('/api/templates', templatesRouter);
 app.use('/api/instances', instancesRouter);
 app.use('/api/review', reviewRouter);
+app.use('/api', dashboardRouter);
 
 // Support both /api/inbox and /api/instances/inbox
 app.get('/api/inbox', getInbox);

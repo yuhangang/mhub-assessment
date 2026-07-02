@@ -375,4 +375,109 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       expect(decision.comment).toBe('Bob approves via review endpoint');
     });
   });
+
+  describe('Part 4 — Data Entry and Automated Checking Usecases', () => {
+    test('Trigger cancellation_with_refund: submitting refund within limit auto-approves and advances', async () => {
+      // 1. Trigger the advanced refund workflow
+      const triggerRes = await request(app)
+        .post('/api/instances')
+        .send({
+          event_name: 'booking.cancellation_with_refund',
+          entity_type: 'booking',
+          entity_id: '1',
+          initiated_by: 1
+        });
+      expect(triggerRes.status).toBe(201);
+      const instanceId = triggerRes.body.instanceId;
+
+      // Fetch the steps
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
+      expect(steps.length).toBe(3);
+      expect(steps[0].step_type).toBe('data_entry');
+      expect(steps[0].status).toBe('awaiting_action');
+      expect(steps[1].step_type).toBe('automated');
+      expect(steps[1].status).toBe('pending');
+      
+      const step1Id = steps[0].id;
+      const step2Id = steps[1].id;
+      const step3Id = steps[2].id;
+
+      // 2. Action Step 1 (Data Entry) by Alice Coordinator (user_id: 1, role: sales_coordinator)
+      // Deposit = 10% of unit price ($450,000) = $45,000. Limit = 5% of unit price = $22,500.
+      // We submit a refund of $15,000 (which is within the limit)
+      const actionRes = await request(app)
+        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
+        .send({
+          user_id: 1,
+          comment: 'Alice enters refund details',
+          submitted_data: { refund_amount: 15000, reason: 'Withdrew before signing' }
+        });
+      expect(actionRes.status).toBe(200);
+
+      // Verify Step 1 is approved and submitted_data is saved
+      const step1Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
+      expect(step1Obj.status).toBe('approved');
+      expect(JSON.parse(step1Obj.submitted_data)).toEqual({ refund_amount: 15000, reason: 'Withdrew before signing' });
+
+      // Verify Step 2 (Automated check) was triggered, passed, and marked approved automatically by System (-1)
+      const step2Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
+      expect(step2Obj.status).toBe('approved');
+
+      const decision2 = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step2Id]) as any;
+      expect(decision2.decision).toBe('approved');
+      expect(decision2.actioned_by).toBe(-1);
+      expect(decision2.comment).toContain('Automated Check Passed');
+
+      // Verify Step 3 is now awaiting_action
+      const step3Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step3Id]) as any;
+      expect(step3Obj.status).toBe('awaiting_action');
+    });
+
+    test('Trigger cancellation_with_refund: submitting refund exceeding limit auto-rejects and terminates workflow', async () => {
+      // 1. Trigger the advanced refund workflow
+      const triggerRes = await request(app)
+        .post('/api/instances')
+        .send({
+          event_name: 'booking.cancellation_with_refund',
+          entity_type: 'booking',
+          entity_id: '2',
+          initiated_by: 1
+        });
+      expect(triggerRes.status).toBe(201);
+      const instanceId = triggerRes.body.instanceId;
+
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
+      const step1Id = steps[0].id;
+      const step2Id = steps[1].id;
+
+      // 2. Action Step 1 (Data Entry)
+      // Price = $520,000, Limit = $26,000.
+      // We submit a refund of $35,000 (which exceeds the limit)
+      const actionRes = await request(app)
+        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
+        .send({
+          user_id: 1,
+          comment: 'Alice enters refund details',
+          submitted_data: { refund_amount: 35000, reason: 'Buyer demands full refund' }
+        });
+      expect(actionRes.status).toBe(200);
+
+      // Verify Step 1 is approved
+      const step1Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
+      expect(step1Obj.status).toBe('approved');
+
+      // Verify Step 2 (Automated check) was triggered and marked rejected automatically by System (-1)
+      const step2Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
+      expect(step2Obj.status).toBe('rejected');
+
+      const decision2 = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step2Id]) as any;
+      expect(decision2.decision).toBe('rejected');
+      expect(decision2.actioned_by).toBe(-1);
+      expect(decision2.comment).toContain('Automated Check Failed');
+
+      // Verify the entire instance is rejected
+      const instanceObj = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [instanceId]) as any;
+      expect(instanceObj.status).toBe('rejected');
+    });
+  });
 });

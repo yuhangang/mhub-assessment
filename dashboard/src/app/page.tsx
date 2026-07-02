@@ -61,7 +61,7 @@ export default function DashboardOverview() {
     }
   };
 
-  const handleQuickTrigger = async (bookingId: string) => {
+  const handleQuickTrigger = async (bookingId: string, eventName: string = 'booking.cancellation_requested') => {
     setMessage('');
     try {
       const savedAgentId = localStorage.getItem('simulated_agent_id') || '1';
@@ -70,7 +70,7 @@ export default function DashboardOverview() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          event_name: 'booking.cancellation_requested',
+          event_name: eventName,
           entity_type: 'booking',
           entity_id: bookingId,
           initiated_by: parseInt(savedAgentId)
@@ -247,17 +247,30 @@ export default function DashboardOverview() {
                           <td className="py-4 text-sm text-slate-300">{bk.project_name} - Unit {bk.unit_number}</td>
                           <td className="py-4 text-sm capitalize text-slate-400">{bk.status}</td>
                           <td className="py-4 text-right">
-                            <button
-                              disabled={hasActiveInstance}
-                              onClick={() => handleQuickTrigger(bk.id.toString())}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                                hasActiveInstance 
-                                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
-                                  : 'bg-gradient-to-r from-indigo-500 to-teal-400 text-white hover:opacity-90 shadow-sm'
-                              }`}
-                            >
-                              {hasActiveInstance ? 'Active Workflow' : 'Trigger Cancellation'}
-                            </button>
+                            <div className="flex gap-2 justify-end">
+                              <button
+                                disabled={hasActiveInstance}
+                                onClick={() => handleQuickTrigger(bk.id.toString(), 'booking.cancellation_requested')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                                  hasActiveInstance 
+                                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
+                                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700 hover:text-white border border-white/5'
+                                }`}
+                              >
+                                Standard Cancel
+                              </button>
+                              <button
+                                disabled={hasActiveInstance}
+                                onClick={() => handleQuickTrigger(bk.id.toString(), 'booking.cancellation_with_refund')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                                  hasActiveInstance 
+                                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
+                                    : 'bg-gradient-to-r from-indigo-500 to-teal-400 text-white hover:opacity-90 shadow-sm'
+                                }`}
+                              >
+                                {hasActiveInstance ? 'Active Workflow' : 'Refund Cancel'}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -298,11 +311,40 @@ export default function DashboardOverview() {
                         <div className="w-0.5 h-6 bg-slate-800 last:hidden mt-1"></div>
                       </div>
                       <div className="flex-1">
-                        <p className="text-sm font-semibold text-white">Step {step.sequence}</p>
-                        <p className="text-xs text-slate-400">
-                          Assignee: {step.assignee_user_id ? `User ID ${step.assignee_user_id}` : `Role ${step.assignee_role}`}
+                        <div className="flex justify-between items-start">
+                          <p className="text-sm font-semibold text-white">Step {step.sequence}</p>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-bold uppercase ${
+                            step.step_type === 'data_entry' ? 'bg-indigo-500/20 text-indigo-400' :
+                            step.step_type === 'automated' ? 'bg-teal-500/20 text-teal-400' :
+                            'bg-slate-800 text-slate-400'
+                          }`}>
+                            {step.step_type.replace('_', ' ')}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-400 mt-0.5">
+                          {step.step_type === 'automated'
+                            ? 'Assignee: System Check'
+                            : `Assignee: ${step.assignee_user_id ? `User ID ${step.assignee_user_id}` : `Role ${step.assignee_role}`}`
+                          }
                         </p>
-                        <span className="text-[10px] uppercase font-bold text-slate-500">{step.status}</span>
+                        <span className="text-[10px] uppercase font-bold text-slate-500 block mt-0.5">{step.status}</span>
+                        {step.submitted_data && (
+                          <div className="bg-slate-950/50 p-2.5 rounded-lg border border-white/5 text-[10px] text-slate-300 mt-2 space-y-1">
+                            <span className="text-[9px] text-indigo-400 font-bold uppercase tracking-wider block">Submitted Data</span>
+                            {(() => {
+                              try {
+                                const parsed = JSON.parse(step.submitted_data);
+                                return Object.entries(parsed).map(([key, val]: any) => (
+                                  <p key={key} className="capitalize">
+                                    <span className="text-slate-500">{key.replace('_', ' ')}:</span> <span className="font-semibold text-slate-200">{val}</span>
+                                  </p>
+                                ));
+                              } catch(e) {
+                                return <p className="text-rose-400">Error parsing data</p>;
+                              }
+                            })()}
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}

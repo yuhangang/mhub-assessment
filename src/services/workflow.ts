@@ -24,6 +24,25 @@ class WorkflowEngineService {
       
       console.log(`[CALLBACK] Successfully cancelled booking ${entityId} and released unit ${booking.unit_id}`);
     });
+
+    // Register callback for booking cancellation with refund
+    this.registerCallback('booking', 'booking.cancellation_with_refund', async (entityId) => {
+      console.log(`[CALLBACK] Running booking cancellation (with refund) handler for booking ID: ${entityId}`);
+      
+      const booking = await db.queryOne('SELECT unit_id FROM bookings WHERE id = ?', [entityId]) as { unit_id: number } | undefined;
+      
+      if (!booking) {
+        throw new Error(`Booking with ID ${entityId} not found in callback`);
+      }
+
+      // Update booking status to cancelled
+      await db.execute("UPDATE bookings SET status = 'cancelled' WHERE id = ?", [entityId]);
+      
+      // Release unit back to available
+      await db.execute("UPDATE units SET status = 'available' WHERE id = ?", [booking.unit_id]);
+      
+      console.log(`[CALLBACK] Successfully cancelled booking ${entityId} and released unit ${booking.unit_id} (refund processed)`);
+    });
   }
 
   /**
@@ -85,15 +104,17 @@ class WorkflowEngineService {
       throw new Error(`Initiator agent with ID ${initiatedByUserId} not found`);
     }
 
-    // Retrieve template steps
+    // Retrieve template steps (including step_type and config)
     const steps = await db.query(
-      'SELECT id, sequence, assignee_user_id, assignee_role FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC',
+      'SELECT id, sequence, assignee_user_id, assignee_role, step_type, config FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC',
       [template.id]
-    ) as { id: number; sequence: number; assignee_user_id: number | null; assignee_role: string | null }[];
+    ) as { id: number; sequence: number; assignee_user_id: number | null; assignee_role: string | null; step_type: string; config: string | null }[];
 
     if (steps.length === 0) {
       throw new Error(`Template ${template.name} (ID: ${template.id}) has no steps configured`);
     }
+
+    let callbackToRun: (() => Promise<void> | void) | null = null;
 
     // Run creation in a database transaction
     const instanceId = await db.transaction(async (tx) => {
@@ -110,13 +131,20 @@ class WorkflowEngineService {
         const stepStatus = step.sequence === 1 ? 'awaiting_action' : 'pending';
         await tx.execute(`
           INSERT INTO workflow_instance_steps 
-          (instance_id, template_step_id, sequence, assignee_user_id, assignee_role, status, version) 
-          VALUES (?, ?, ?, ?, ?, ?, 0)
-        `, [newId, step.id, step.sequence, step.assignee_user_id, step.assignee_role, stepStatus]);
+          (instance_id, template_step_id, sequence, assignee_user_id, assignee_role, status, step_type, config, version) 
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+        `, [newId, step.id, step.sequence, step.assignee_user_id, step.assignee_role, stepStatus, step.step_type, step.config]);
       }
+
+      // 3. Immediately run starting automated steps if any
+      callbackToRun = await this.executeAutomatedSteps(tx, newId);
 
       return newId;
     });
+
+    if (callbackToRun) {
+      await (callbackToRun as any)();
+    }
 
     return instanceId;
   }
@@ -129,7 +157,8 @@ class WorkflowEngineService {
     stepId: number,
     userId: number,
     action: 'approved' | 'rejected',
-    comment?: string
+    comment?: string,
+    submittedData?: any
   ): Promise<void> {
     const callbackToRun = await db.transaction(async (tx) => {
       let pendingCallback: (() => Promise<void> | void) | null = null;
@@ -172,11 +201,21 @@ class WorkflowEngineService {
       const decisionStatus = action === 'approved' ? 'approved' : 'rejected';
 
       // 1. Optimistic Locking Status Update
-      const updateStep = await tx.execute(`
-        UPDATE workflow_instance_steps 
-        SET status = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
-        WHERE id = ? AND status = 'awaiting_action' AND version = ?
-      `, [decisionStatus, stepId, step.version]);
+      let updateStep;
+      if (submittedData) {
+        const submittedDataStr = typeof submittedData === 'string' ? submittedData : JSON.stringify(submittedData);
+        updateStep = await tx.execute(`
+          UPDATE workflow_instance_steps 
+          SET status = ?, submitted_data = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'awaiting_action' AND version = ?
+        `, [decisionStatus, submittedDataStr, stepId, step.version]);
+      } else {
+        updateStep = await tx.execute(`
+          UPDATE workflow_instance_steps 
+          SET status = ?, version = version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = ? AND status = 'awaiting_action' AND version = ?
+        `, [decisionStatus, stepId, step.version]);
+      }
 
       if (updateStep.changes === 0) {
         throw new Error('Concurrency Conflict: This step has already been actioned by another user');
@@ -218,6 +257,12 @@ class WorkflowEngineService {
             WHERE id = ?
           `, [nextStep.id]);
           console.log(`[ENGINE] Step approved. Advanced instance ${instanceId} to step ${nextStep.id} (sequence ${nextStep.sequence})`);
+
+          // Execute any automated steps starting from this new step
+          const autoCallback = await this.executeAutomatedSteps(tx, instanceId);
+          if (autoCallback) {
+            pendingCallback = autoCallback;
+          }
         } else {
           // No more steps. Instance is fully approved
           await tx.execute(`
@@ -255,6 +300,133 @@ class WorkflowEngineService {
     if (callbackToRun) {
       await callbackToRun();
     }
+  }
+
+  /**
+   * Process and execute any pending automated workflow steps recursively
+   */
+  private async executeAutomatedSteps(tx: any, instanceId: number): Promise<(() => Promise<void> | void) | null> {
+    let pendingCallback: (() => Promise<void> | void) | null = null;
+    let running = true;
+
+    while (running) {
+      // Find the step currently awaiting action
+      const activeStep = await tx.queryOne(
+        "SELECT * FROM workflow_instance_steps WHERE instance_id = ? AND status = 'awaiting_action'",
+        [instanceId]
+      ) as any;
+
+      if (!activeStep || activeStep.step_type !== 'automated') {
+        running = false;
+        break;
+      }
+
+      console.log(`[ENGINE] Executing automated step sequence ${activeStep.sequence} (ID: ${activeStep.id})`);
+
+      // 1. Fetch the data submitted in the previous step(s)
+      const dataEntryStep = await tx.queryOne(
+        "SELECT submitted_data FROM workflow_instance_steps WHERE instance_id = ? AND step_type = 'data_entry' AND status = 'approved' ORDER BY sequence DESC LIMIT 1",
+        [instanceId]
+      ) as any;
+
+      let refundAmount = 0;
+      if (dataEntryStep && dataEntryStep.submitted_data) {
+        try {
+          const parsed = JSON.parse(dataEntryStep.submitted_data);
+          refundAmount = parseFloat(parsed.refund_amount || '0');
+        } catch (e) {
+          console.error('[ENGINE] Error parsing submitted data:', e);
+        }
+      }
+
+      // 2. Fetch the entity details (booking and unit price)
+      const instance = await tx.queryOne(
+        "SELECT entity_type, entity_id FROM workflow_instances WHERE id = ?",
+        [instanceId]
+      ) as { entity_type: string; entity_id: string };
+
+      let maxLimit = 0;
+      let unitPrice = 0;
+      if (instance && instance.entity_type === 'booking') {
+        const booking = await tx.queryOne(
+          "SELECT b.unit_id, u.price_cents FROM bookings b JOIN units u ON b.unit_id = u.id WHERE b.id = ?",
+          [instance.entity_id]
+        ) as { unit_id: number; price_cents: number } | undefined;
+
+        if (booking) {
+          unitPrice = booking.price_cents / 100;
+          // Deposit is 10% of price, limit is 50% of deposit (which is 5% of price)
+          maxLimit = unitPrice * 0.05;
+        }
+      }
+
+      const passed = refundAmount <= maxLimit;
+      const decisionStatus = passed ? 'approved' : 'rejected';
+      const comment = passed
+        ? `Automated Check Passed: Refund amount of $${refundAmount.toLocaleString()} is within the 5% deposit limit ($${maxLimit.toLocaleString()})`
+        : `Automated Check Failed: Refund amount of $${refundAmount.toLocaleString()} exceeds the 5% deposit limit ($${maxLimit.toLocaleString()})`;
+
+      // Update the automated step status
+      await tx.execute(
+        "UPDATE workflow_instance_steps SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        [decisionStatus, activeStep.id]
+      );
+
+      // Log decision (System User ID is -1)
+      await tx.execute(
+        "INSERT INTO workflow_step_decisions (step_id, instance_id, decision, actioned_by, comment) VALUES (?, ?, ?, ?, ?)",
+        [activeStep.id, instanceId, decisionStatus, -1, comment]
+      );
+
+      if (!passed) {
+        // Reject instance
+        await tx.execute(
+          "UPDATE workflow_instances SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+          [instanceId]
+        );
+        console.log(`[ENGINE] Instance ${instanceId} automatically rejected at step ${activeStep.id} by system check.`);
+        running = false;
+      } else {
+        // Check next step
+        const nextStep = await tx.queryOne(
+          "SELECT * FROM workflow_instance_steps WHERE instance_id = ? AND sequence > ? ORDER BY sequence ASC LIMIT 1",
+          [instanceId, activeStep.sequence]
+        ) as any;
+
+        if (nextStep) {
+          await tx.execute(
+            "UPDATE workflow_instance_steps SET status = 'awaiting_action', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [nextStep.id]
+          );
+          // Loop continues to check if the next step is also automated
+        } else {
+          // Complete/approve instance
+          await tx.execute(
+            "UPDATE workflow_instances SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [instanceId]
+          );
+          
+          const templateInfo = await tx.queryOne(
+            "SELECT template_id FROM workflow_instances WHERE id = ?",
+            [instanceId]
+          ) as { template_id: number };
+
+          const template = await tx.queryOne(
+            "SELECT trigger_event FROM workflow_templates WHERE id = ?",
+            [templateInfo.template_id]
+          ) as { trigger_event: string };
+
+          const key = `${instance.entity_type}:${template.trigger_event}`;
+          const callback = this.callbacks.get(key);
+          if (callback) {
+            pendingCallback = () => callback(instance.entity_id);
+          }
+          running = false;
+        }
+      }
+    }
+
+    return pendingCallback;
   }
 }
 

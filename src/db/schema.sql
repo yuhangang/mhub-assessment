@@ -70,15 +70,21 @@ CREATE TABLE IF NOT EXISTS workflow_template_steps (
     sequence INTEGER NOT NULL CHECK(sequence > 0), -- Enforced sequence > 0
     assignee_user_id INTEGER,
     assignee_role TEXT,
+    step_type TEXT NOT NULL DEFAULT 'approval' CHECK(step_type IN ('approval', 'data_entry', 'automated')),
+    config TEXT, -- Holds JSON configuration (e.g. form fields or automated checks)
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (template_id) REFERENCES workflow_templates(id) ON DELETE CASCADE,
     FOREIGN KEY (assignee_user_id) REFERENCES agents(id) ON DELETE RESTRICT,
     UNIQUE(template_id, sequence),
-    -- Ensure exactly one assignee field is populated
+    -- Ensure exactly one assignee is populated if not automated, or both are NULL if automated
     CHECK (
-      (assignee_user_id IS NOT NULL AND assignee_role IS NULL)
+      (step_type = 'automated' AND assignee_user_id IS NULL AND assignee_role IS NULL)
       OR
-      (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
+      (step_type != 'automated' AND (
+        (assignee_user_id IS NOT NULL AND assignee_role IS NULL)
+        OR
+        (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
+      ))
     ),
     CHECK (assignee_role IN ('sales_manager', 'finance_manager', 'sales_coordinator') OR assignee_role IS NULL)
 );
@@ -110,6 +116,9 @@ CREATE TABLE IF NOT EXISTS workflow_instance_steps (
     sequence INTEGER NOT NULL CHECK(sequence > 0), -- Enforced sequence > 0
     assignee_user_id INTEGER,
     assignee_role TEXT,
+    step_type TEXT NOT NULL DEFAULT 'approval' CHECK(step_type IN ('approval', 'data_entry', 'automated')),
+    config TEXT,
+    submitted_data TEXT, -- Holds submitted JSON values from data entry step
     status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'awaiting_action', 'approved', 'rejected', 'cancelled')), -- Default pending & support cancelled status
     version INTEGER NOT NULL DEFAULT 0, -- Optimistic locking
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -119,10 +128,15 @@ CREATE TABLE IF NOT EXISTS workflow_instance_steps (
     FOREIGN KEY (assignee_user_id) REFERENCES agents(id) ON DELETE RESTRICT,
     UNIQUE(instance_id, sequence),
     UNIQUE(id, instance_id), -- Required for composite FK validation
+    -- Ensure exactly one assignee is populated if not automated, or both are NULL if automated
     CHECK (
-      (assignee_user_id IS NOT NULL AND assignee_role IS NULL)
+      (step_type = 'automated' AND assignee_user_id IS NULL AND assignee_role IS NULL)
       OR
-      (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
+      (step_type != 'automated' AND (
+        (assignee_user_id IS NOT NULL AND assignee_role IS NULL)
+        OR
+        (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
+      ))
     ),
     CHECK (assignee_role IN ('sales_manager', 'finance_manager', 'sales_coordinator') OR assignee_role IS NULL) -- Role validation
 );

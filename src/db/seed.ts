@@ -48,6 +48,7 @@ export async function runSeed() {
 
   // Seed Predefined Trigger Events
   await db.execute('INSERT INTO workflow_events (name, description, is_enabled) VALUES (?, ?, ?)', ['booking.cancellation_requested', 'Triggered when a buyer cancellation is requested', 1]);
+  await db.execute('INSERT INTO workflow_events (name, description, is_enabled) VALUES (?, ?, ?)', ['booking.cancellation_with_refund', 'Triggered when a buyer cancellation with refund is requested', 1]);
   await db.execute('INSERT INTO workflow_events (name, description, is_enabled) VALUES (?, ?, ?)', ['booking.confirmed', 'Triggered when a booking is confirmed', 1]);
   await db.execute('INSERT INTO workflow_events (name, description, is_enabled) VALUES (?, ?, ?)', ['unit.price_updated', 'Triggered when unit price changes', 1]);
   console.log('Seeded Workflow Events');
@@ -78,6 +79,9 @@ export async function runSeed() {
   console.log('Seeded 10 Units');
 
   // Seed Agents/Users
+  // Seed the special system agent with ID -1 for automated checks
+  await db.execute('INSERT INTO agents (id, name, email, role) VALUES (-1, ?, ?, ?)', ['System Automated Check', 'system@mhub.my', 'sales_manager']);
+
   const alice = await db.execute('INSERT INTO agents (name, email, role) VALUES (?, ?, ?)', ['Alice Coordinator', 'alice@mhub.my', 'sales_coordinator']);
   const bob = await db.execute('INSERT INTO agents (name, email, role) VALUES (?, ?, ?)', ['Bob Manager', 'bob@mhub.my', 'sales_manager']);
   const charlie = await db.execute('INSERT INTO agents (name, email, role) VALUES (?, ?, ?)', ['Charlie Finance', 'charlie@mhub.my', 'finance_manager']);
@@ -100,7 +104,7 @@ export async function runSeed() {
 
   console.log('Seeded 5 Bookings');
 
-  // Seed Workflow Template for booking.cancellation_requested
+  // Seed original Workflow Template for booking.cancellation_requested
   const template = await db.execute('INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)', [
     'Booking Cancellation Workflow',
     'Standard workflow for cancellation requests of booked properties',
@@ -111,14 +115,55 @@ export async function runSeed() {
 
   console.log(`Seeded Template: Booking Cancellation Workflow (ID: ${templateId}, Active: 1)`);
 
-  // Seed Steps using new assignee columns
   // Step 1: Assigned to Role "sales_manager"
-  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)', [templateId, 1, null, 'sales_manager']);
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [templateId, 1, null, 'sales_manager', 'approval', null]);
   
   // Step 2: Assigned to User "Charlie Finance" (ID 3)
-  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role) VALUES (?, ?, ?, ?)', [templateId, 2, charlieId, null]);
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [templateId, 2, charlieId, null, 'approval', null]);
 
-  console.log('Seeded Workflow Template Steps (Step 1: Role sales_manager, Step 2: User ' + charlieId + ')');
+  console.log('Seeded Booking Cancellation Workflow Steps (Step 1: Role sales_manager, Step 2: User ' + charlieId + ')');
+
+  // Seed NEW Workflow Template for booking.cancellation_with_refund
+  const refundTemplate = await db.execute('INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)', [
+    'Refund Processing Workflow',
+    'Advanced workflow with manual refund data entry and automated policy checking',
+    'booking.cancellation_with_refund',
+    1
+  ]);
+  const refundTemplateId = refundTemplate.lastInsertRowid;
+
+  console.log(`Seeded Template: Refund Processing Workflow (ID: ${refundTemplateId}, Active: 1)`);
+
+  // Seed Steps for the Refund Processing Workflow
+  // Step 1: Data Entry by Sales Coordinator (Alice)
+  const step1Config = JSON.stringify({
+    fields: [
+      { name: 'refund_amount', type: 'number', label: 'Refund Amount ($)', required: true },
+      { name: 'reason', type: 'text', label: 'Reason for Cancellation', required: true }
+    ]
+  });
+  await db.execute(
+    'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)',
+    [refundTemplateId, 1, null, 'sales_coordinator', 'data_entry', step1Config]
+  );
+  
+  // Step 2: Automated check verifying if the refund amount is within limit (5% of unit price)
+  const step2Config = JSON.stringify({
+    rule: 'refund_limit',
+    max_ratio: 0.05
+  });
+  await db.execute(
+    'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)',
+    [refundTemplateId, 2, null, null, 'automated', step2Config]
+  );
+
+  // Step 3: Final approval by Sales Manager (Bob)
+  await db.execute(
+    'INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)',
+    [refundTemplateId, 3, null, 'sales_manager', 'approval', null]
+  );
+
+  console.log('Seeded Refund Processing Workflow Steps (Step 1: Role sales_coordinator [Data Entry], Step 2: Automated Check, Step 3: Role sales_manager [Approval])');
   console.log('Database seeding completed successfully.');
 }
 

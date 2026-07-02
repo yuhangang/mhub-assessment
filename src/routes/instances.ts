@@ -214,7 +214,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 router.post('/:id/steps/:stepId/approve', async (req: Request, res: Response) => {
   const instanceId = parseInt(req.params.id);
   const stepId = parseInt(req.params.stepId);
-  const { user_id, comment } = req.body;
+  const { user_id, comment, submitted_data } = req.body;
 
   if (isNaN(instanceId) || isNaN(stepId)) {
     return res.status(400).json({ error: 'Invalid instanceId or stepId parameter' });
@@ -224,7 +224,7 @@ router.post('/:id/steps/:stepId/approve', async (req: Request, res: Response) =>
   }
 
   try {
-    await WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'approved', comment);
+    await WorkflowEngine.actionStep(instanceId, stepId, parseInt(user_id), 'approved', comment, submitted_data);
     return res.json({ success: true, message: 'Step approved successfully' });
   } catch (error: any) {
     console.error('Error approving step:', error);

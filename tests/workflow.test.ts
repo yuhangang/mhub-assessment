@@ -2,6 +2,7 @@ import request from 'supertest';
 import app from '../src/index';
 import db from '../src/db/connection';
 import { runSeed } from '../src/db/seed';
+import { WorkflowEngine } from '../src/services/workflow';
 
 describe('Workflow Engine Technical Challenge Tests', () => {
   beforeEach(async () => {
@@ -540,6 +541,77 @@ describe('Workflow Engine Technical Challenge Tests', () => {
       // Verify the entire instance is rejected
       const instanceObj = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [instanceId]) as any;
       expect(instanceObj.status).toBe('rejected');
+    });
+  });
+
+  describe('Part 5 — VIP & Unit Price Workflow Extensions', () => {
+    beforeEach(async () => {
+      await runSeed();
+    });
+
+    test('VIP discount approval - automatically rejects if discount exceeds 10%', async () => {
+      const instanceId = await WorkflowEngine.triggerInstance(
+        'booking.vip_discount_requested',
+        'booking',
+        '1',
+        1
+      );
+
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
+      
+      // Approve data entry with 12% discount
+      await WorkflowEngine.actionStep(
+        instanceId,
+        steps[0].id,
+        1,
+        'approved',
+        'Entering discount details',
+        { discount_percent: '12', vip_card_id: 'VIP999' }
+      );
+
+      // Verify that it automatically fails and terminates the instance
+      const updatedInstance = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [instanceId]) as any;
+      expect(updatedInstance.status).toBe('rejected');
+    });
+
+    test('Unit price update - updates the unit price upon full approval if within limit', async () => {
+      // Unit price update template was seeded inactive. Let's activate it first:
+      await db.execute('UPDATE workflow_templates SET is_active = 1 WHERE trigger_event = ?', ['unit.price_updated']);
+
+      const instanceId = await WorkflowEngine.triggerInstance(
+        'unit.price_updated',
+        'unit',
+        '2',
+        1
+      );
+
+      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
+      
+      // Original price of unit 2 is 52,000,000 cents. 10% increase is 57,200,000 cents
+      await WorkflowEngine.actionStep(
+        instanceId,
+        steps[0].id,
+        1,
+        'approved',
+        'Entering price details',
+        { new_price_cents: '57200000', reason: 'Market adjustments' }
+      );
+
+      // Approve automated step (which passes) & Finance manager approval
+      const nextSteps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
+      
+      // Finance manager is charlie (User ID 3)
+      await WorkflowEngine.actionStep(
+        instanceId,
+        nextSteps[2].id,
+        3,
+        'approved',
+        'Finance clearance'
+      );
+
+      // Verify that the workflow completed successfully and unit price is updated
+      const updatedUnit = await db.queryOne('SELECT price_cents FROM units WHERE id = 2') as any;
+      expect(updatedUnit.price_cents).toBe(57200000);
     });
   });
 });

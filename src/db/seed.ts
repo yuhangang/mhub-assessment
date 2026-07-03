@@ -164,6 +164,114 @@ export async function runSeed() {
   );
 
   console.log('Seeded Refund Processing Workflow Steps (Step 1: Role sales_coordinator [Data Entry], Step 2: Automated Check, Step 3: Role sales_manager [Approval])');
+
+  // 1. Seed VIP Discount event
+  await db.execute('INSERT INTO workflow_events (name, description, is_enabled) VALUES (?, ?, ?)', [
+    'booking.vip_discount_requested',
+    'Triggered when a VIP buyer discount is requested',
+    1
+  ]);
+
+  // 2. Seed VIP Discount Approval Workflow Template
+  const vipTemplate = await db.execute('INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)', [
+    'VIP Discount Approval Workflow',
+    'Workflow for approving special VIP discount rates on property bookings',
+    'booking.vip_discount_requested',
+    1
+  ]);
+  const vipTemplateId = vipTemplate.lastInsertRowid;
+
+  // Step 1: Data entry of VIP details
+  const vipStep1Config = JSON.stringify({
+    fields: [
+      { name: 'discount_percent', type: 'number', label: 'Discount Percentage (%)', required: true },
+      { name: 'vip_card_id', type: 'text', label: 'VIP Card ID Number', required: true }
+    ]
+  });
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    vipTemplateId, 1, null, 'sales_coordinator', 'data_entry', vipStep1Config
+  ]);
+
+  // Step 2: Automated discount limit check
+  const vipStep2Config = JSON.stringify({
+    rule: 'discount_limit',
+    max_discount_percent: 10
+  });
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    vipTemplateId, 2, null, null, 'automated', vipStep2Config
+  ]);
+
+  // Step 3: Finance Manager approval
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    vipTemplateId, 3, null, 'finance_manager', 'approval', null
+  ]);
+
+  // Step 4: Sales Manager approval
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    vipTemplateId, 4, null, 'sales_manager', 'approval', null
+  ]);
+
+
+  // 3. Seed Unit Price Change Workflow Template
+  const priceTemplate = await db.execute('INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)', [
+    'Unit Price Change Workflow',
+    'Workflow to approve modifications/updates to unit sale pricing',
+    'unit.price_updated',
+    1
+  ]);
+  const priceTemplateId = priceTemplate.lastInsertRowid;
+
+  // Step 1: Data entry of pricing details
+  const priceStep1Config = JSON.stringify({
+    fields: [
+      { name: 'new_price_cents', type: 'number', label: 'New Price (in Cents)', required: true },
+      { name: 'reason', type: 'text', label: 'Reason for Pricing Modification', required: true }
+    ]
+  });
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    priceTemplateId, 1, null, 'sales_coordinator', 'data_entry', priceStep1Config
+  ]);
+
+  // Step 2: Automated price change limit check (max 15% increase)
+  const priceStep2Config = JSON.stringify({
+    rule: 'price_increase_limit',
+    max_increase_ratio: 0.15
+  });
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    priceTemplateId, 2, null, null, 'automated', priceStep2Config
+  ]);
+
+  // Step 3: Finance Manager approval
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    priceTemplateId, 3, null, 'finance_manager', 'approval', null
+  ]);
+
+
+  // 4. Seed Booking Confirmation Workflow Template
+  const confirmTemplate = await db.execute('INSERT INTO workflow_templates (name, description, trigger_event, is_active) VALUES (?, ?, ?, ?)', [
+    'Booking Confirmation Workflow',
+    'Workflow for verifying buyer documents and clearing payments to confirm booking',
+    'booking.confirmed',
+    1
+  ]);
+  const confirmTemplateId = confirmTemplate.lastInsertRowid;
+
+  // Step 1: Data entry of checklist
+  const confirmStep1Config = JSON.stringify({
+    fields: [
+      { name: 'documents_signed', type: 'text', label: 'Documents Signed & Verified Status (Yes/No)', required: true },
+      { name: 'deposit_received_cents', type: 'number', label: 'Deposit Amount Received (Cents)', required: true }
+    ]
+  });
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    confirmTemplateId, 1, null, 'sales_coordinator', 'data_entry', confirmStep1Config
+  ]);
+
+  // Step 2: Finance Manager approval
+  await db.execute('INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role, step_type, config) VALUES (?, ?, ?, ?, ?, ?)', [
+    confirmTemplateId, 2, null, 'finance_manager', 'approval', null
+  ]);
+
   console.log('Database seeding completed successfully.');
 }
 

@@ -43,6 +43,45 @@ class WorkflowEngineService {
       
       console.log(`[CALLBACK] Successfully cancelled booking ${entityId} and released unit ${booking.unit_id} (refund processed)`);
     });
+
+    // Register callback for vip discount approval
+    this.registerCallback('booking', 'booking.vip_discount_requested', async (entityId) => {
+      console.log(`[CALLBACK] Running VIP discount approval handler for booking ID: ${entityId}`);
+      await db.execute("UPDATE bookings SET comment = 'VIP Discount Approved' WHERE id = ?", [entityId]).catch(() => {});
+    });
+
+    // Register callback for unit price update
+    this.registerCallback('unit', 'unit.price_updated', async (entityId) => {
+      console.log(`[CALLBACK] Running Unit price update handler for Unit ID: ${entityId}`);
+      
+      const latestApprovedPrice = await db.queryOne(`
+        SELECT wsd.submitted_data
+        FROM workflow_instances wi
+        JOIN workflow_instance_steps wsd ON wi.id = wsd.instance_id
+        WHERE wi.entity_type = 'unit' AND wi.entity_id = ? AND wi.status = 'approved' AND wsd.step_type = 'data_entry'
+        ORDER BY wi.created_at DESC LIMIT 1
+      `, [entityId]) as { submitted_data: string } | undefined;
+
+      if (latestApprovedPrice && latestApprovedPrice.submitted_data) {
+        try {
+          const data = JSON.parse(latestApprovedPrice.submitted_data);
+          const newPrice = parseInt(data.new_price_cents);
+          if (newPrice > 0) {
+            await db.execute("UPDATE units SET price_cents = ? WHERE id = ?", [newPrice, entityId]);
+            console.log(`[CALLBACK] Successfully updated Unit ${entityId} price to ${newPrice} cents`);
+          }
+        } catch (e) {
+          console.error('[CALLBACK] Error parsing approved unit price:', e);
+        }
+      }
+    });
+
+    // Register callback for booking confirmation
+    this.registerCallback('booking', 'booking.confirmed', async (entityId) => {
+      console.log(`[CALLBACK] Running Booking Confirmation handler for Booking ID: ${entityId}`);
+      await db.execute("UPDATE bookings SET status = 'active' WHERE id = ?", [entityId]);
+      console.log(`[CALLBACK] Successfully confirmed booking ${entityId} as active`);
+    });
   }
 
   /**
@@ -329,14 +368,21 @@ class WorkflowEngineService {
         [instanceId]
       ) as any;
 
-      let refundAmount = 0;
+      let submittedFields: any = {};
       if (dataEntryStep && dataEntryStep.submitted_data) {
         try {
-          const parsed = JSON.parse(dataEntryStep.submitted_data);
-          refundAmount = parseFloat(parsed.refund_amount || '0');
+          submittedFields = JSON.parse(dataEntryStep.submitted_data);
         } catch (e) {
           console.error('[ENGINE] Error parsing submitted data:', e);
         }
+      }
+
+      // Parse step configuration
+      let stepConfig: any = {};
+      if (activeStep.config) {
+        try {
+          stepConfig = JSON.parse(activeStep.config);
+        } catch (e) {}
       }
 
       // 2. Fetch the entity details (booking and unit price)
@@ -345,26 +391,62 @@ class WorkflowEngineService {
         [instanceId]
       ) as { entity_type: string; entity_id: string };
 
-      let maxLimit = 0;
-      let unitPrice = 0;
-      if (instance && instance.entity_type === 'booking') {
-        const booking = await tx.queryOne(
-          "SELECT b.unit_id, u.price_cents FROM bookings b JOIN units u ON b.unit_id = u.id WHERE b.id = ?",
-          [instance.entity_id]
-        ) as { unit_id: number; price_cents: number } | undefined;
+      let passed = true;
+      let comment = `Automated Check Passed.`;
 
-        if (booking) {
-          unitPrice = booking.price_cents / 100;
-          // Deposit is 10% of price, limit is 50% of deposit (which is 5% of price)
-          maxLimit = unitPrice * 0.05;
+      if (stepConfig.rule === 'discount_limit') {
+        const discountPercent = parseFloat(submittedFields.discount_percent || '0');
+        const maxPercent = stepConfig.max_discount_percent || 10;
+        passed = discountPercent <= maxPercent;
+        comment = passed
+          ? `Automated Check Passed: Discount percentage of ${discountPercent}% is within the limit of ${maxPercent}%`
+          : `Automated Check Failed: Discount percentage of ${discountPercent}% exceeds the limit of ${maxPercent}%`;
+
+      } else if (stepConfig.rule === 'price_increase_limit') {
+        const newPriceCents = parseInt(submittedFields.new_price_cents || '0');
+        let maxLimit = 0;
+        let originalPrice = 0;
+        
+        if (instance && instance.entity_type === 'unit') {
+          const unit = await tx.queryOne(
+            "SELECT price_cents FROM units WHERE id = ?",
+            [instance.entity_id]
+          ) as { price_cents: number } | undefined;
+
+          if (unit) {
+            originalPrice = unit.price_cents;
+            // Max increase limit
+            maxLimit = originalPrice * (1 + (stepConfig.max_increase_ratio || 0.15));
+          }
         }
+        passed = newPriceCents <= maxLimit;
+        comment = passed
+          ? `Automated Check Passed: New price of $${(newPriceCents / 100).toLocaleString()} is within the 15% increase limit ($${(maxLimit / 100).toLocaleString()})`
+          : `Automated Check Failed: New price of $${(newPriceCents / 100).toLocaleString()} exceeds the 15% increase limit ($${(maxLimit / 100).toLocaleString()})`;
+
+      } else {
+        // Default rule: refund_limit
+        const refundAmount = parseFloat(submittedFields.refund_amount || '0');
+        let maxLimit = 0;
+        let unitPrice = 0;
+        if (instance && instance.entity_type === 'booking') {
+          const booking = await tx.queryOne(
+            "SELECT b.unit_id, u.price_cents FROM bookings b JOIN units u ON b.unit_id = u.id WHERE b.id = ?",
+            [instance.entity_id]
+          ) as { unit_id: number; price_cents: number } | undefined;
+
+          if (booking) {
+            unitPrice = booking.price_cents / 100;
+            maxLimit = unitPrice * (stepConfig.max_ratio || 0.05);
+          }
+        }
+        passed = refundAmount <= maxLimit;
+        comment = passed
+          ? `Automated Check Passed: Refund amount of $${refundAmount.toLocaleString()} is within the 5% deposit limit ($${maxLimit.toLocaleString()})`
+          : `Automated Check Failed: Refund amount of $${refundAmount.toLocaleString()} exceeds the 5% deposit limit ($${maxLimit.toLocaleString()})`;
       }
 
-      const passed = refundAmount <= maxLimit;
       const decisionStatus = passed ? 'approved' : 'rejected';
-      const comment = passed
-        ? `Automated Check Passed: Refund amount of $${refundAmount.toLocaleString()} is within the 5% deposit limit ($${maxLimit.toLocaleString()})`
-        : `Automated Check Failed: Refund amount of $${refundAmount.toLocaleString()} exceeds the 5% deposit limit ($${maxLimit.toLocaleString()})`;
 
       // Update the automated step status
       await tx.execute(

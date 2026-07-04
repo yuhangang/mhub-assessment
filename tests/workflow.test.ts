@@ -1,617 +1,333 @@
 import request from 'supertest';
-import app from '../src/index';
-import db from '../src/db/connection';
-import { runSeed } from '../src/db/seed';
-import { WorkflowEngine } from '../src/services/workflow';
+import { createApp } from '../src/app';
+import { pool, query } from '../src/db';
 
-describe('Workflow Engine Technical Challenge Tests', () => {
-  beforeEach(async () => {
-    // Reset and seed the database before each test
-    await runSeed();
-  });
+describe('workflow engine', () => {
+  const app = createApp();
 
   afterAll(async () => {
-    // Close DB connection
-    await db.close();
+    await pool.end();
   });
 
-  describe('Part 2.1 — Template Management', () => {
-    test('POST /api/templates - creates a new template and its steps successfully', async () => {
-      const payload = {
-        name: 'New Custom Workflow',
-        description: 'Verifies price updates',
+  beforeAll(async () => {
+    await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
+    await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1');
+    await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS previous_template_id BIGINT REFERENCES workflow_templates(id) ON DELETE RESTRICT');
+    await query('DROP INDEX IF EXISTS idx_one_active_template_per_trigger');
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_template_per_trigger
+      ON workflow_templates(trigger_event)
+      WHERE is_active = true AND deleted_at IS NULL
+    `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_template_versions
+      ON workflow_templates(trigger_event, version)
+    `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_template_single_child
+      ON workflow_templates(previous_template_id)
+      WHERE previous_template_id IS NOT NULL
+    `);
+  });
+
+  beforeEach(async () => {
+    await query('TRUNCATE workflow_step_decisions, workflow_instance_steps, workflow_instances, workflow_template_steps, workflow_templates, bookings, units, projects, agents, workflow_events RESTART IDENTITY CASCADE');
+    await query(`
+      INSERT INTO projects (name) VALUES ('Northbank Residences'), ('South Garden');
+      INSERT INTO units (project_id, unit_number, status, price_cents) VALUES
+        (1, 'A-01-01', 'booked', 85000000),
+        (1, 'A-01-02', 'available', 78000000),
+        (1, 'A-02-01', 'available', 90000000),
+        (1, 'A-02-02', 'available', 91000000),
+        (1, 'A-03-01', 'available', 92000000),
+        (2, 'B-01-01', 'available', 65000000),
+        (2, 'B-01-02', 'available', 66000000),
+        (2, 'B-02-01', 'available', 68000000),
+        (2, 'B-02-02', 'available', 69000000),
+        (2, 'B-03-01', 'available', 71000000);
+      INSERT INTO agents (name, email, role) VALUES
+        ('Sarah Sales', 'sarah@example.com', 'sales_manager'),
+        ('Farid Finance', 'farid@example.com', 'finance_manager'),
+        ('Carmen Coordinator', 'carmen@example.com', 'sales_coordinator');
+      INSERT INTO bookings (unit_id, agent_id, buyer_name, status) VALUES
+        (1, 3, 'Buyer One', 'active'),
+        (2, 3, 'Buyer Two', 'pending'),
+        (3, 3, 'Buyer Three', 'pending'),
+        (4, 3, 'Buyer Four', 'pending'),
+        (5, 3, 'Buyer Five', 'pending');
+      INSERT INTO workflow_events (name, description) VALUES
+        ('booking.cancellation_requested', 'Booking cancellation approval'),
+        ('unit.price_updated', 'Unit price update approval');
+      INSERT INTO workflow_templates (name, description, trigger_event, is_active)
+      VALUES ('Booking Cancellation Approval', 'Sales then finance approval', 'booking.cancellation_requested', true);
+      INSERT INTO workflow_template_steps (template_id, sequence, assignee_role)
+      VALUES (1, 1, 'sales_manager');
+      INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id)
+      VALUES (1, 2, 2);
+    `);
+  });
+
+  test('triggers a workflow instance and exposes the first approver inbox item', async () => {
+    const trigger = await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    expect(trigger.body.instance_id).toBe(1);
+
+    const inbox = await request(app).get('/api/inbox?role=sales_manager').expect(200);
+    expect(inbox.body).toHaveLength(1);
+    expect(inbox.body[0]).toMatchObject({ instance_id: 1, sequence: 1, status: 'awaiting_action' });
+  });
+
+  test('rejects duplicate running workflow for the same source entity', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    const duplicate = await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(409);
+
+    expect(duplicate.body.error).toContain('already has an active workflow instance');
+  });
+
+  test('approves sequential steps and runs booking cancellation callback on final approval', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    await request(app).post('/api/instances/1/steps/1/approve').send({ user_id: 1, comment: 'Sales approved' }).expect(200);
+
+    const financeInbox = await request(app).get('/api/inbox?user_id=2').expect(200);
+    expect(financeInbox.body[0]).toMatchObject({ instance_id: 1, sequence: 2, status: 'awaiting_action' });
+
+    await request(app).post('/api/instances/1/steps/2/approve').send({ user_id: 2, comment: 'Finance approved' }).expect(200);
+
+    const instance = await request(app).get('/api/instances/1').expect(200);
+    expect(instance.body.status).toBe('approved');
+    expect(instance.body.audit_trail).toHaveLength(2);
+
+    const booking = await query<{ booking_status: string; unit_status: string }>(
+      `SELECT b.status AS booking_status, u.status AS unit_status
+       FROM bookings b JOIN units u ON b.unit_id = u.id WHERE b.id = 1`
+    );
+    expect(booking.rows[0]).toEqual({ booking_status: 'cancelled', unit_status: 'available' });
+  });
+
+  test('rejects a workflow immediately and requires a rejection comment', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    await request(app).post('/api/instances/1/steps/1/reject').send({ user_id: 1 }).expect(400);
+
+    await request(app).post('/api/instances/1/steps/1/reject').send({ user_id: 1, comment: 'Missing buyer document' }).expect(200);
+
+    const instance = await request(app).get('/api/instances/1').expect(200);
+    expect(instance.body.status).toBe('rejected');
+    expect(instance.body.steps[1].status).toBe('cancelled');
+  });
+
+  test('allows only one concurrent action to win a step', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    const responses = await Promise.all([
+      request(app).post('/api/instances/1/steps/1/approve').send({ user_id: 1, comment: 'First' }),
+      request(app).post('/api/instances/1/steps/1/approve').send({ user_id: 1, comment: 'Second' })
+    ]);
+
+    const statusCodes = responses.map((response) => response.status).sort();
+    expect(statusCodes).toEqual([200, 409]);
+
+    const decisions = await query('SELECT * FROM workflow_step_decisions WHERE step_id = 1');
+    expect(decisions.rowCount).toBe(1);
+  });
+
+  test('rolls back template creation when one step insert fails', async () => {
+    await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Broken Template',
+        description: 'Should not persist if any step is invalid',
+        trigger_event: 'booking.cancellation_requested',
+        is_active: false,
+        steps: [
+          { sequence: 1, assignee_role: 'sales_manager' },
+          { sequence: 2, assignee_role: 'finance_manager', assignee_user_id: 2 }
+        ]
+      })
+      .expect(400);
+
+    const persisted = await query('SELECT id FROM workflow_templates WHERE name = $1', ['Broken Template']);
+    expect(persisted.rowCount).toBe(0);
+  });
+
+  test('returns a clear conflict when activating a template for an already active trigger', async () => {
+    const inactive = await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Second Cancellation Template',
+        description: 'Inactive alternative',
+        trigger_event: 'booking.cancellation_requested',
+        is_active: false,
+        steps: [{ sequence: 1, assignee_role: 'sales_manager' }]
+      })
+      .expect(201);
+
+    const activation = await request(app)
+      .post(`/api/templates/${inactive.body.id}/activate`)
+      .send()
+      .expect(409);
+
+    expect(activation.body.error).toBe("Another template is already active for trigger event 'booking.cancellation_requested'");
+  });
+
+  test('rejects empty template patch values explicitly', async () => {
+    const response = await request(app)
+      .patch('/api/templates/1')
+      .send({ name: '' })
+      .expect(400);
+
+    expect(response.body.error).toBe('Template name cannot be empty');
+  });
+
+  test('patching a template creates a new revision for future workflows', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    const revision = await request(app)
+      .patch('/api/templates/1')
+      .send({
+        name: 'Booking Cancellation Finance Review',
+        description: 'Finance handles the next revision',
+        steps: [{ sequence: 1, assignee_role: 'finance_manager' }]
+      })
+      .expect(200);
+
+    expect(Number(revision.body.id)).toBe(2);
+    expect(revision.body.version).toBe(2);
+    expect(Number(revision.body.previous_template_id)).toBe(1);
+    expect(revision.body.is_active).toBe(true);
+
+    const templates = await query(
+      `SELECT id, is_active, version, previous_template_id
+       FROM workflow_templates
+       ORDER BY id ASC`
+    );
+    expect(templates.rows.map((template) => ({
+      ...template,
+      id: Number(template.id),
+      previous_template_id: template.previous_template_id === null ? null : Number(template.previous_template_id)
+    }))).toEqual([
+      expect.objectContaining({ id: 1, is_active: false, version: 1, previous_template_id: null }),
+      expect.objectContaining({ id: 2, is_active: true, version: 2, previous_template_id: 1 })
+    ]);
+
+    const oldInstanceSteps = await query(
+      `SELECT assignee_role
+       FROM workflow_instance_steps
+       WHERE instance_id = 1
+       ORDER BY sequence ASC`
+    );
+    expect(oldInstanceSteps.rows[0].assignee_role).toBe('sales_manager');
+
+    const newWorkflow = await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '2', initiated_by: 3 })
+      .expect(201);
+
+    const newInstance = await query(
+      `SELECT wi.template_id, wis.assignee_role
+       FROM workflow_instances wi
+       JOIN workflow_instance_steps wis ON wis.instance_id = wi.id
+       WHERE wi.id = $1 AND wis.sequence = 1`,
+      [newWorkflow.body.instance_id]
+    );
+    expect(Number(newInstance.rows[0].template_id)).toBe(2);
+    expect(newInstance.rows[0].assignee_role).toBe('finance_manager');
+  });
+
+  test('dashboard payload includes workflow events for template settings', async () => {
+    const response = await request(app).get('/api/dashboard').expect(200);
+
+    expect(response.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'booking.cancellation_requested',
+          description: 'Booking cancellation approval'
+        }),
+        expect.objectContaining({
+          name: 'unit.price_updated',
+          description: 'Unit price update approval'
+        })
+      ])
+    );
+  });
+
+  test('soft deletes an unused template and hides it from template settings', async () => {
+    const created = await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Unit Price Approval',
+        description: 'Inactive test template',
         trigger_event: 'unit.price_updated',
-        is_active: 1,
-        steps: [
-          { sequence: 1, assignee_role: 'finance_manager' },
-          { sequence: 2, assignee_user_id: 2 }
-        ]
-      };
+        is_active: true,
+        steps: [{ sequence: 1, assignee_role: 'finance_manager' }]
+      })
+      .expect(201);
 
-      const res = await request(app)
-        .post('/api/templates')
-        .send(payload);
+    await request(app).delete(`/api/templates/${created.body.id}`).expect(200);
 
-      expect(res.status).toBe(201);
-      expect(res.body).toHaveProperty('success', true);
-      expect(res.body).toHaveProperty('templateId');
+    const templates = await request(app).get('/api/templates').expect(200);
+    expect(templates.body.map((template: any) => template.name)).not.toContain('Unit Price Approval');
 
-      // Verify template exists in DB
-      const template = await db.queryOne('SELECT * FROM workflow_templates WHERE id = ?', [res.body.templateId]) as any;
-      expect(template.name).toBe('New Custom Workflow');
-      expect(template.description).toBe('Verifies price updates');
-      expect(template.is_active).toBe(1);
-
-      // Verify steps
-      const steps = await db.query('SELECT * FROM workflow_template_steps WHERE template_id = ? ORDER BY sequence ASC', [res.body.templateId]) as any[];
-      expect(steps.length).toBe(2);
-      expect(steps[0].assignee_role).toBe('finance_manager');
-      expect(steps[0].assignee_user_id).toBeNull();
-      expect(steps[1].assignee_user_id).toBe(2);
-      expect(steps[1].assignee_role).toBeNull();
-    });
-
-    test('POST /api/templates - rejects duplicate active trigger event', async () => {
-      const payload = {
-        name: 'Duplicate Workflow',
-        trigger_event: 'booking.cancellation_requested',
-        is_active: 1,
-        steps: [
-          { sequence: 1, assignee_role: 'sales_manager' }
-        ]
-      };
-
-      const res = await request(app)
-        .post('/api/templates')
-        .send(payload);
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain('already bound to trigger event');
-    });
-
-    test('GET /api/templates/:id - returns template details with steps', async () => {
-      const res = await request(app).get('/api/templates/1');
-      expect(res.status).toBe(200);
-      expect(res.body.name).toBe('Booking Cancellation Workflow');
-      expect(res.body.description).toBe('Standard workflow for cancellation requests of booked properties');
-      expect(res.body.steps.length).toBe(2);
-      expect(res.body.steps[0].sequence).toBe(1);
-      expect(res.body.steps[0].assignee_role).toBe('sales_manager');
-    });
-
-    test('PUT /api/templates/:id - creates a new template version for future instances', async () => {
-      const payload = {
-        name: 'Updated Name',
-        description: 'New Description',
-        trigger_event: 'booking.cancellation_requested',
-        steps: [
-          { sequence: 1, assignee_role: 'sales_coordinator' }
-        ]
-      };
-
-      const res = await request(app)
-        .put('/api/templates/1')
-        .send(payload);
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-      expect(res.body).toHaveProperty('templateId');
-      expect(res.body.templateId).not.toBe(1);
-
-      const originalTemplate = await db.queryOne(
-        'SELECT id, name, description, is_active, version FROM workflow_templates WHERE id = 1'
-      ) as any;
-      const newTemplate = await db.queryOne(
-        'SELECT id, name, description, is_active, version, previous_template_id FROM workflow_templates WHERE id = ?',
-        [res.body.templateId]
-      ) as any;
-
-      expect(originalTemplate.name).toBe('Booking Cancellation Workflow');
-      expect(originalTemplate.description).toBe('Standard workflow for cancellation requests of booked properties');
-      expect(originalTemplate.is_active).toBe(0);
-      expect(originalTemplate.version).toBe(1);
-
-      expect(newTemplate.name).toBe('Updated Name');
-      expect(newTemplate.description).toBe('New Description');
-      expect(newTemplate.is_active).toBe(1);
-      expect(newTemplate.version).toBe(2);
-      expect(newTemplate.previous_template_id).toBe(1);
-    });
-
-    test('PUT /api/templates/:id - allows updates while instances are running and keeps old instances pinned', async () => {
-      // Trigger an instance first
-      const firstInstanceRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      expect(firstInstanceRes.status).toBe(201);
-
-      const payload = {
-        name: 'Updated Name',
-        trigger_event: 'booking.cancellation_requested',
-        steps: [
-          { sequence: 1, assignee_role: 'sales_coordinator' }
-        ]
-      };
-
-      const res = await request(app)
-        .put('/api/templates/1')
-        .send(payload);
-
-      expect(res.status).toBe(200);
-      expect(res.body.success).toBe(true);
-
-      const originalInstance = await db.queryOne(
-        'SELECT template_id FROM workflow_instances WHERE id = ?',
-        [firstInstanceRes.body.instanceId]
-      ) as any;
-      const originalInstanceSteps = await db.query(
-        'SELECT sequence, assignee_role, assignee_user_id FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC',
-        [firstInstanceRes.body.instanceId]
-      ) as any[];
-
-      expect(originalInstance.template_id).toBe(1);
-      expect(originalInstanceSteps).toEqual([
-        { sequence: 1, assignee_role: 'sales_manager', assignee_user_id: null },
-        { sequence: 2, assignee_role: null, assignee_user_id: 3 }
-      ]);
-
-      await request(app)
-        .post('/api/instances/1/steps/1/approve')
-        .send({ user_id: 2, comment: 'Manager approves original flow' });
-
-      const secondInstanceRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '2',
-          initiated_by: 1
-        });
-
-      expect(secondInstanceRes.status).toBe(201);
-
-      const secondInstance = await db.queryOne(
-        'SELECT template_id FROM workflow_instances WHERE id = ?',
-        [secondInstanceRes.body.instanceId]
-      ) as any;
-      const secondInstanceSteps = await db.query(
-        'SELECT sequence, assignee_role, assignee_user_id FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC',
-        [secondInstanceRes.body.instanceId]
-      ) as any[];
-
-      expect(secondInstance.template_id).toBe(res.body.templateId);
-      expect(secondInstanceSteps).toEqual([
-        { sequence: 1, assignee_role: 'sales_coordinator', assignee_user_id: null }
-      ]);
-    });
+    const persisted = await query(
+      'SELECT is_active, deleted_at FROM workflow_templates WHERE id = $1',
+      [created.body.id]
+    );
+    expect(persisted.rows[0].is_active).toBe(false);
+    expect(persisted.rows[0].deleted_at).toBeTruthy();
   });
 
-  describe('Part 2.2 — Triggering Workflow Instance', () => {
-    test('POST /api/instances - triggers workflow instance successfully and configures step status', async () => {
-      const res = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
+  test('blocks soft delete while a workflow is running against the template', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
 
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body).toHaveProperty('instanceId');
-
-      // Verify instance status in DB (should be 'in_progress')
-      const instance = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [res.body.instanceId]) as any;
-      expect(instance.status).toBe('in_progress');
-      expect(instance.entity_type).toBe('booking');
-      expect(instance.entity_id).toBe('1');
-      expect(instance.initiated_by).toBe(1);
-
-      // Verify step statuses (Step 1 -> awaiting_action, Step 2 -> pending)
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [res.body.instanceId]) as any[];
-      expect(steps.length).toBe(2);
-      expect(steps[0].sequence).toBe(1);
-      expect(steps[0].status).toBe('awaiting_action');
-      expect(steps[1].sequence).toBe(2);
-      expect(steps[1].status).toBe('pending');
-    });
-
-    test('POST /api/instances - prevents duplicate running instances for same entity', async () => {
-      // First trigger
-      await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      // Second trigger (should fail)
-      const res = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toContain('active workflow instance already exists');
-    });
+    const response = await request(app).delete('/api/templates/1').expect(409);
+    expect(response.body.error).toBe('Cannot delete a template while instances are running against it');
   });
 
-  describe('Part 2.3 — Inbox & Step Actions & Concurrency', () => {
-    test('GET /api/inbox - retrieves pending steps matching role or user ID', async () => {
-      // Trigger instance
-      await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
+  test('does not trigger workflows from soft-deleted templates', async () => {
+    const created = await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Unit Price Approval',
+        description: 'Temporary active template',
+        trigger_event: 'unit.price_updated',
+        is_active: true,
+        steps: [{ sequence: 1, assignee_role: 'finance_manager' }]
+      })
+      .expect(201);
 
-      // Step 1 is assigned to role 'sales_manager'
-      // Fetch inbox for sales_manager
-      const resRole = await request(app).get('/api/inbox?role=sales_manager');
-      expect(resRole.status).toBe(200);
-      expect(resRole.body.length).toBe(1);
-      expect(resRole.body[0].assignee_role).toBe('sales_manager');
-      expect(resRole.body[0].source_entity.buyer_name).toBe('John Doe');
+    await request(app).delete(`/api/templates/${created.body.id}`).expect(200);
 
-      // Fetch inbox for non-matching role
-      const resWrongRole = await request(app).get('/api/inbox?role=finance_manager');
-      expect(resWrongRole.status).toBe(200);
-      expect(resWrongRole.body.length).toBe(0);
-    });
+    const response = await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'unit.price_updated', entity_type: 'unit', entity_id: '2', initiated_by: 3 })
+      .expect(404);
 
-    test('POST /api/instances/:id/steps/:stepId/approve - workflow progression, audit trail & callback', async () => {
-      // Trigger instance
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      const instanceId = triggerRes.body.instanceId;
-
-      // Get steps to find IDs
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      const step1Id = steps[0].id;
-      const step2Id = steps[1].id;
-
-      // Alice (ID: 1, role sales_coordinator) tries to approve step 1. Forbidden.
-      const forbiddenRes = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({ user_id: 1, comment: 'Illegal approval' });
-      expect(forbiddenRes.status).toBe(403);
-
-      // Bob (ID: 2, role sales_manager) approves step 1. Success.
-      const approve1Res = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({ user_id: 2, comment: 'Manager approves' });
-      expect(approve1Res.status).toBe(200);
-
-      // Verify audit decision created
-      const decisions = await db.query('SELECT * FROM workflow_step_decisions WHERE instance_id = ?', [instanceId]) as any[];
-      expect(decisions.length).toBe(1);
-      expect(decisions[0].step_id).toBe(step1Id);
-      expect(decisions[0].decision).toBe('approved');
-      expect(decisions[0].actioned_by).toBe(2);
-      expect(decisions[0].comment).toBe('Manager approves');
-
-      // Verify step 2 is now awaiting_action
-      const step2 = await db.queryOne('SELECT status FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
-      expect(step2.status).toBe('awaiting_action');
-
-      // Charlie (ID: 3, role finance_manager) is assigned explicitly as user_id 3 on step 2.
-      // Charlie approves step 2. Success.
-      const approve2Res = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step2Id}/approve`)
-        .send({ user_id: 3, comment: 'Finance sign-off' });
-      expect(approve2Res.status).toBe(200);
-
-      // Verify instance details and full audit history
-      const instanceRes = await request(app).get(`/api/instances/${instanceId}`);
-      expect(instanceRes.status).toBe(200);
-      expect(instanceRes.body.status).toBe('approved');
-      expect(instanceRes.body.audit_trail.length).toBe(2);
-      expect(instanceRes.body.audit_trail[0].decision).toBe('approved');
-      expect(instanceRes.body.audit_trail[1].decision).toBe('approved');
-      expect(instanceRes.body.audit_trail[1].agent_name).toBe('Charlie Finance');
-
-      // Verify Callback executed
-      const booking = await db.queryOne('SELECT status, unit_id FROM bookings WHERE id = 1') as any;
-      expect(booking.status).toBe('cancelled');
-    });
-
-    test('POST /api/instances/:id/steps/:stepId/reject - rejects step immediately & terminates workflow', async () => {
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      const instanceId = triggerRes.body.instanceId;
-      const step1Id = (await db.queryOne('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1', [instanceId]) as any).id;
-
-      // Reject step 1 (Bob, ID 2, sales_manager)
-      const rejectRes = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step1Id}/reject`)
-        .send({ user_id: 2, comment: 'Booking cannot be cancelled' });
-
-      expect(rejectRes.status).toBe(200);
-
-      // Verify step is rejected in decisions
-      const decisions = await db.query('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step1Id]) as any[];
-      expect(decisions.length).toBe(1);
-      expect(decisions[0].decision).toBe('rejected');
-      expect(decisions[0].comment).toBe('Booking cannot be cancelled');
-
-      // Verify instance status is 'rejected'
-      const instance = await db.queryOne('SELECT status FROM workflow_instances WHERE id = ?', [instanceId]) as any;
-      expect(instance.status).toBe('rejected');
-    });
-
-    test('Concurrency Control - optimistic locking blocks simultaneous step approvals', async () => {
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      const instanceId = triggerRes.body.instanceId;
-      const step1Id = (await db.queryOne('SELECT id FROM workflow_instance_steps WHERE instance_id = ? AND sequence = 1', [instanceId]) as any).id;
-
-      const [res1, res2] = await Promise.all([
-        request(app).post(`/api/instances/${instanceId}/steps/${step1Id}/approve`).send({ user_id: 2, comment: 'Approver A' }),
-        request(app).post(`/api/instances/${instanceId}/steps/${step1Id}/approve`).send({ user_id: 2, comment: 'Approver B' })
-      ]);
-
-      const statuses = [res1.status, res2.status];
-      expect(statuses).toContain(200);
-      expect(statuses).toContain(409);
-    });
-  });
-
-  describe('Part 3 — Code Review Rewrite Endpoint', () => {
-    test('POST /api/review/workflow-instances/:id/steps/:stepId/approve - checks validations and progressive approvals', async () => {
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_requested',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-
-      const instanceId = triggerRes.body.instanceId;
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      const step1Id = steps[0].id;
-      const step2Id = steps[1].id;
-
-      // 1. Step 2 is not actionable (still pending)
-      const step2Res = await request(app)
-        .post(`/api/review/workflow-instances/${instanceId}/steps/${step2Id}/approve`)
-        .send({ user_id: 3, comment: 'Finance sign-off early' });
-      expect(step2Res.status).toBe(400);
-
-      // 2. Unauthorized user
-      const authRes = await request(app)
-        .post(`/api/review/workflow-instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({ user_id: 1 });
-      expect(authRes.status).toBe(403);
-
-      // 3. Approve successfully
-      const approveRes1 = await request(app)
-        .post(`/api/review/workflow-instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({ user_id: 2, comment: 'Bob approves via review endpoint' });
-      expect(approveRes1.status).toBe(200);
-
-      // Verify db changes
-      const step1 = await db.queryOne('SELECT status, version FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
-      expect(step1.status).toBe('approved');
-      expect(step1.version).toBe(1);
-
-      // Verify decisions log
-      const decision = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step1Id]) as any;
-      expect(decision.decision).toBe('approved');
-      expect(decision.comment).toBe('Bob approves via review endpoint');
-    });
-  });
-
-  describe('Part 4 — Data Entry and Automated Checking Usecases', () => {
-    test('Trigger cancellation_with_refund: submitting refund within limit auto-approves and advances', async () => {
-      // 1. Trigger the advanced refund workflow
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_with_refund',
-          entity_type: 'booking',
-          entity_id: '1',
-          initiated_by: 1
-        });
-      expect(triggerRes.status).toBe(201);
-      const instanceId = triggerRes.body.instanceId;
-
-      // Fetch the steps
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      expect(steps.length).toBe(3);
-      expect(steps[0].step_type).toBe('data_entry');
-      expect(steps[0].status).toBe('awaiting_action');
-      expect(steps[1].step_type).toBe('automated');
-      expect(steps[1].status).toBe('pending');
-      
-      const step1Id = steps[0].id;
-      const step2Id = steps[1].id;
-      const step3Id = steps[2].id;
-
-      // 2. Action Step 1 (Data Entry) by Alice Coordinator (user_id: 1, role: sales_coordinator)
-      // Deposit = 10% of unit price ($450,000) = $45,000. Limit = 5% of unit price = $22,500.
-      // We submit a refund of $15,000 (which is within the limit)
-      const actionRes = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({
-          user_id: 1,
-          comment: 'Alice enters refund details',
-          submitted_data: { refund_amount: 15000, reason: 'Withdrew before signing' }
-        });
-      expect(actionRes.status).toBe(200);
-
-      // Verify Step 1 is approved and submitted_data is saved
-      const step1Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
-      expect(step1Obj.status).toBe('approved');
-      expect(JSON.parse(step1Obj.submitted_data)).toEqual({ refund_amount: 15000, reason: 'Withdrew before signing' });
-
-      // Verify Step 2 (Automated check) was triggered, passed, and marked approved automatically by System (-1)
-      const step2Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
-      expect(step2Obj.status).toBe('approved');
-
-      const decision2 = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step2Id]) as any;
-      expect(decision2.decision).toBe('approved');
-      expect(decision2.actioned_by).toBe(-1);
-      expect(decision2.comment).toContain('Automated Check Passed');
-
-      // Verify Step 3 is now awaiting_action
-      const step3Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step3Id]) as any;
-      expect(step3Obj.status).toBe('awaiting_action');
-    });
-
-    test('Trigger cancellation_with_refund: submitting refund exceeding limit auto-rejects and terminates workflow', async () => {
-      // 1. Trigger the advanced refund workflow
-      const triggerRes = await request(app)
-        .post('/api/instances')
-        .send({
-          event_name: 'booking.cancellation_with_refund',
-          entity_type: 'booking',
-          entity_id: '2',
-          initiated_by: 1
-        });
-      expect(triggerRes.status).toBe(201);
-      const instanceId = triggerRes.body.instanceId;
-
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      const step1Id = steps[0].id;
-      const step2Id = steps[1].id;
-
-      // 2. Action Step 1 (Data Entry)
-      // Price = $520,000, Limit = $26,000.
-      // We submit a refund of $35,000 (which exceeds the limit)
-      const actionRes = await request(app)
-        .post(`/api/instances/${instanceId}/steps/${step1Id}/approve`)
-        .send({
-          user_id: 1,
-          comment: 'Alice enters refund details',
-          submitted_data: { refund_amount: 35000, reason: 'Buyer demands full refund' }
-        });
-      expect(actionRes.status).toBe(200);
-
-      // Verify Step 1 is approved
-      const step1Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step1Id]) as any;
-      expect(step1Obj.status).toBe('approved');
-
-      // Verify Step 2 (Automated check) was triggered and marked rejected automatically by System (-1)
-      const step2Obj = await db.queryOne('SELECT * FROM workflow_instance_steps WHERE id = ?', [step2Id]) as any;
-      expect(step2Obj.status).toBe('rejected');
-
-      const decision2 = await db.queryOne('SELECT * FROM workflow_step_decisions WHERE step_id = ?', [step2Id]) as any;
-      expect(decision2.decision).toBe('rejected');
-      expect(decision2.actioned_by).toBe(-1);
-      expect(decision2.comment).toContain('Automated Check Failed');
-
-      // Verify the entire instance is rejected
-      const instanceObj = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [instanceId]) as any;
-      expect(instanceObj.status).toBe('rejected');
-    });
-  });
-
-  describe('Part 5 — VIP & Unit Price Workflow Extensions', () => {
-    beforeEach(async () => {
-      await runSeed();
-    });
-
-    test('VIP discount approval - automatically rejects if discount exceeds 10%', async () => {
-      const instanceId = await WorkflowEngine.triggerInstance(
-        'booking.vip_discount_requested',
-        'booking',
-        '1',
-        1
-      );
-
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      
-      // Approve data entry with 12% discount
-      await WorkflowEngine.actionStep(
-        instanceId,
-        steps[0].id,
-        1,
-        'approved',
-        'Entering discount details',
-        { discount_percent: '12', vip_card_id: 'VIP999' }
-      );
-
-      // Verify that it automatically fails and terminates the instance
-      const updatedInstance = await db.queryOne('SELECT * FROM workflow_instances WHERE id = ?', [instanceId]) as any;
-      expect(updatedInstance.status).toBe('rejected');
-    });
-
-    test('Unit price update - updates the unit price upon full approval if within limit', async () => {
-      // Unit price update template was seeded inactive. Let's activate it first:
-      await db.execute('UPDATE workflow_templates SET is_active = 1 WHERE trigger_event = ?', ['unit.price_updated']);
-
-      const instanceId = await WorkflowEngine.triggerInstance(
-        'unit.price_updated',
-        'unit',
-        '2',
-        1
-      );
-
-      const steps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      
-      // Original price of unit 2 is 52,000,000 cents. 10% increase is 57,200,000 cents
-      await WorkflowEngine.actionStep(
-        instanceId,
-        steps[0].id,
-        1,
-        'approved',
-        'Entering price details',
-        { new_price_cents: '57200000', reason: 'Market adjustments' }
-      );
-
-      // Approve automated step (which passes) & Finance manager approval
-      const nextSteps = await db.query('SELECT * FROM workflow_instance_steps WHERE instance_id = ? ORDER BY sequence ASC', [instanceId]) as any[];
-      
-      // Finance manager is charlie (User ID 3)
-      await WorkflowEngine.actionStep(
-        instanceId,
-        nextSteps[2].id,
-        3,
-        'approved',
-        'Finance clearance'
-      );
-
-      // Verify that the workflow completed successfully and unit price is updated
-      const updatedUnit = await db.queryOne('SELECT price_cents FROM units WHERE id = 2') as any;
-      expect(updatedUnit.price_cents).toBe(57200000);
-    });
+    expect(response.body.error).toBe('No active workflow template found for event unit.price_updated');
   });
 });

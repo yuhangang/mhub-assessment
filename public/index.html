@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MHUB Workflow Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>Workflow Admin</h1>
+          <p>Booking cancellation approvals, inbox actions, and instance history.</p>
+        </div>
+        <label class="agent-picker">
+          Acting as
+          <select id="agentSelect"></select>
+        </label>
+      </header>
+
+      <nav class="tab-nav">
+        <button type="button" class="tab-btn active" id="tabBtnDashboard">Dashboard</button>
+        <button type="button" class="tab-btn" id="tabBtnSettings">Workflow Settings</button>
+      </nav>
+
+      <!-- Dashboard Tab Content -->
+      <div id="tabContentDashboard">
+        <section class="metrics" id="metrics"></section>
+
+        <!-- Approver Inbox (moved to the top) -->
+        <section class="panel">
+          <div class="panel-heading">
+            <h2>Approver Inbox</h2>
+          </div>
+          <div id="inboxList" class="stack"></div>
+        </section>
+
+        <!-- Bookings -->
+        <section class="panel" style="margin-top: 16px;">
+          <div class="panel-heading">
+            <h2>Bookings</h2>
+            <button id="refreshBtn" type="button">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Booking</th>
+                  <th>Buyer</th>
+                  <th>Unit</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="bookingRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Workflow Instances and History side-by-side -->
+        <section class="grid" id="instanceSection" style="margin-top: 16px;">
+          <div class="panel">
+            <div class="panel-heading">
+              <h2>Workflow Instances</h2>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Template</th>
+                    <th>Source</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody id="instanceRows"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel" id="instanceHistoryPanel" hidden>
+            <div class="panel-heading">
+              <h2>Instance History</h2>
+              <button type="button" class="secondary" id="closeHistoryBtn">Close</button>
+            </div>
+            <div id="instanceHistoryContent"></div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Workflow Settings Tab Content -->
+      <div id="tabContentSettings" hidden>
+        <section class="panel template-settings">
+          <div class="panel-heading">
+            <h2>Template Settings</h2>
+          </div>
+          <div class="settings-grid">
+            <form id="templateForm" class="template-form">
+              <label>
+                Template name
+                <input id="templateName" type="text" placeholder="VIP Discount Approval" required />
+              </label>
+              <label>
+                Trigger event
+                <select id="templateEvent" required></select>
+              </label>
+              <label>
+                Description
+                <textarea id="templateDescription" placeholder="Short purpose for this workflow"></textarea>
+              </label>
+              <div class="step-grid">
+                <label>
+                  Step 1 role
+                  <select id="stepOneRole">
+                    <option value="sales_manager">Sales Manager</option>
+                    <option value="finance_manager">Finance Manager</option>
+                    <option value="sales_coordinator">Sales Coordinator</option>
+                  </select>
+                </label>
+                <label>
+                  Step 2 specific approver
+                  <select id="stepTwoUser"></select>
+                </label>
+              </div>
+              <label class="check-row">
+                <input id="templateActive" type="checkbox" />
+                Activate after creation
+              </label>
+              <button type="submit">Create template</button>
+            </form>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Trigger</th>
+                    <th>Status</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="templateRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="toast" class="toast" hidden></div>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

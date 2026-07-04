@@ -1,37 +1,29 @@
-version: '3.8'
-
 services:
-  api:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - PORT=3000
-      - NODE_ENV=production
-      - DB_TYPE=postgres
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/mhub_workflow
-    command: sh -c "node dist/db/seed.js && node dist/index.js"
-    depends_on:
-      db:
-        condition: service_healthy
-
-  db:
+  postgres:
     image: postgres:16-alpine
-    restart: always
-    ports:
-      - "5432:5432"
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=mhub_workflow
+      POSTGRES_DB: mhub_workflow
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d mhub_workflow"]
       interval: 5s
-      timeout: 5s
-      retries: 5
+      timeout: 3s
+      retries: 20
 
-volumes:
-  postgres_data:
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/mhub_workflow
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
 

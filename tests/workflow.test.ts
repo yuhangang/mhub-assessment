@@ -13,7 +13,12 @@ describe('workflow engine', () => {
     await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ');
     await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1');
     await query('ALTER TABLE workflow_templates ADD COLUMN IF NOT EXISTS previous_template_id BIGINT REFERENCES workflow_templates(id) ON DELETE RESTRICT');
+    await query('ALTER TABLE workflow_template_steps ADD COLUMN IF NOT EXISTS group_sequence INTEGER NOT NULL DEFAULT 1');
+    await query("ALTER TABLE workflow_template_steps ADD COLUMN IF NOT EXISTS approval_policy TEXT NOT NULL DEFAULT 'ALL'");
+    await query('ALTER TABLE workflow_instance_steps ADD COLUMN IF NOT EXISTS group_sequence INTEGER NOT NULL DEFAULT 1');
+    await query("ALTER TABLE workflow_instance_steps ADD COLUMN IF NOT EXISTS approval_policy TEXT NOT NULL DEFAULT 'ALL'");
     await query('DROP INDEX IF EXISTS idx_one_active_template_per_trigger');
+    await query('DROP INDEX IF EXISTS idx_one_awaiting_step_per_instance');
     await query(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_template_per_trigger
       ON workflow_templates(trigger_event)
@@ -255,6 +260,78 @@ describe('workflow engine', () => {
     );
     expect(Number(newInstance.rows[0].template_id)).toBe(2);
     expect(newInstance.rows[0].assignee_role).toBe('finance_manager');
+  });
+
+  test('waits for every approval in a parallel group before moving to the next group', async () => {
+    await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Parallel Unit Price Approval',
+        description: 'Sales first, finance and coordinator in parallel, final finance sign-off',
+        trigger_event: 'unit.price_updated',
+        is_active: true,
+        steps: [
+          { sequence: 1, group_sequence: 1, assignee_role: 'sales_manager' },
+          { sequence: 2, group_sequence: 2, assignee_role: 'finance_manager' },
+          { sequence: 3, group_sequence: 2, assignee_role: 'sales_coordinator' },
+          { sequence: 4, group_sequence: 3, assignee_user_id: 2 }
+        ]
+      })
+      .expect(201);
+
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'unit.price_updated', entity_type: 'unit', entity_id: '2', initiated_by: 3 })
+      .expect(201);
+
+    await request(app).post('/api/instances/1/steps/1/approve').send({ user_id: 1, comment: 'Sales approved' }).expect(200);
+
+    const parallelSteps = await query(
+      `SELECT id, sequence, assignee_role, status
+       FROM workflow_instance_steps
+       WHERE instance_id = 1 AND group_sequence = 2
+       ORDER BY sequence ASC`
+    );
+    expect(parallelSteps.rows).toEqual([
+      expect.objectContaining({ sequence: 2, assignee_role: 'finance_manager', status: 'awaiting_action' }),
+      expect.objectContaining({ sequence: 3, assignee_role: 'sales_coordinator', status: 'awaiting_action' })
+    ]);
+
+    await request(app)
+      .post(`/api/instances/1/steps/${parallelSteps.rows[0].id}/approve`)
+      .send({ user_id: 2, comment: 'Finance approved' })
+      .expect(200);
+
+    const afterOneParallelApproval = await query(
+      `SELECT sequence, status
+       FROM workflow_instance_steps
+       WHERE instance_id = 1 AND sequence IN (3, 4)
+       ORDER BY sequence ASC`
+    );
+    expect(afterOneParallelApproval.rows).toEqual([
+      expect.objectContaining({ sequence: 3, status: 'awaiting_action' }),
+      expect.objectContaining({ sequence: 4, status: 'pending' })
+    ]);
+
+    await request(app)
+      .post(`/api/instances/1/steps/${parallelSteps.rows[1].id}/approve`)
+      .send({ user_id: 3, comment: 'Coordinator approved' })
+      .expect(200);
+
+    const finalStep = await query(
+      `SELECT id, sequence, status
+       FROM workflow_instance_steps
+       WHERE instance_id = 1 AND sequence = 4`
+    );
+    expect(finalStep.rows[0]).toMatchObject({ sequence: 4, status: 'awaiting_action' });
+
+    await request(app)
+      .post(`/api/instances/1/steps/${finalStep.rows[0].id}/approve`)
+      .send({ user_id: 2, comment: 'Final approval' })
+      .expect(200);
+
+    const instance = await request(app).get('/api/instances/1').expect(200);
+    expect(instance.body.status).toBe('approved');
   });
 
   test('dashboard payload includes workflow events for template settings', async () => {

@@ -75,6 +75,8 @@ CREATE TABLE workflow_template_steps (
   id BIGSERIAL PRIMARY KEY,
   template_id BIGINT NOT NULL REFERENCES workflow_templates(id) ON DELETE CASCADE,
   sequence INTEGER NOT NULL CHECK (sequence > 0),
+  group_sequence INTEGER NOT NULL CHECK (group_sequence > 0),
+  approval_policy TEXT NOT NULL DEFAULT 'ALL' CHECK (approval_policy = 'ALL'),
   assignee_user_id BIGINT REFERENCES agents(id) ON DELETE RESTRICT,
   assignee_role TEXT CHECK (assignee_role IN ('sales_manager', 'finance_manager', 'sales_coordinator')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -85,6 +87,14 @@ CREATE TABLE workflow_template_steps (
     (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
   )
 );
+
+CREATE UNIQUE INDEX idx_template_parallel_unique_role
+ON workflow_template_steps(template_id, group_sequence, assignee_role)
+WHERE assignee_role IS NOT NULL;
+
+CREATE UNIQUE INDEX idx_template_parallel_unique_user
+ON workflow_template_steps(template_id, group_sequence, assignee_user_id)
+WHERE assignee_user_id IS NOT NULL;
 
 CREATE TABLE workflow_instances (
   id BIGSERIAL PRIMARY KEY,
@@ -99,7 +109,7 @@ CREATE TABLE workflow_instances (
 );
 
 CREATE UNIQUE INDEX idx_one_running_instance_per_entity
-ON workflow_instances(entity_type, entity_id)
+ON workflow_instances(entity_type, entity_id, trigger_event)
 WHERE status IN ('pending', 'in_progress');
 
 CREATE INDEX idx_workflow_instances_status ON workflow_instances(status);
@@ -109,6 +119,8 @@ CREATE TABLE workflow_instance_steps (
   instance_id BIGINT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
   template_step_id BIGINT REFERENCES workflow_template_steps(id) ON DELETE SET NULL,
   sequence INTEGER NOT NULL CHECK (sequence > 0),
+  group_sequence INTEGER NOT NULL CHECK (group_sequence > 0),
+  approval_policy TEXT NOT NULL DEFAULT 'ALL' CHECK (approval_policy = 'ALL'),
   assignee_user_id BIGINT REFERENCES agents(id) ON DELETE RESTRICT,
   assignee_role TEXT CHECK (assignee_role IN ('sales_manager', 'finance_manager', 'sales_coordinator')),
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'awaiting_action', 'approved', 'rejected', 'cancelled')),
@@ -122,10 +134,6 @@ CREATE TABLE workflow_instance_steps (
     (assignee_user_id IS NULL AND assignee_role IS NOT NULL)
   )
 );
-
-CREATE UNIQUE INDEX idx_one_awaiting_step_per_instance
-ON workflow_instance_steps(instance_id)
-WHERE status = 'awaiting_action';
 
 CREATE INDEX idx_steps_awaiting_user
 ON workflow_instance_steps(assignee_user_id)

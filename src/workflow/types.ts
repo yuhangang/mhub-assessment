@@ -17,6 +17,8 @@ export interface InstanceStep {
   id: string;
   instance_id: string;
   sequence: number;
+  group_sequence: number;
+  approval_policy: 'ALL';
   assignee_user_id: string | null;
   assignee_role: string | null;
   status: string;
@@ -25,6 +27,8 @@ export interface InstanceStep {
 
 export interface TemplateStepInput {
   sequence: number;
+  group_sequence?: number;
+  approval_policy?: 'ALL';
   assignee_user_id?: number | string | null;
   assignee_role?: string | null;
 }

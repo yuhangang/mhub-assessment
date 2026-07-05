@@ -25,15 +25,15 @@ export class InstanceService {
       const existingResult = await client.query(
         `SELECT id
          FROM workflow_instances
-         WHERE entity_type = $1 AND entity_id = $2 AND status IN ('pending', 'in_progress')
+         WHERE entity_type = $1 AND entity_id = $2 AND trigger_event = $3 AND status IN ('pending', 'in_progress')
          LIMIT 1`,
-        [input.entity_type, input.entity_id]
+        [input.entity_type, input.entity_id, input.event_name]
       );
 
       if ((existingResult.rowCount || 0) > 0) {
         throw new HttpError(
           409,
-          `Entity ${input.entity_type}:${input.entity_id} already has an active workflow instance (${existingResult.rows[0].id})`
+          `Entity ${input.entity_type}:${input.entity_id} already has an active workflow instance for event ${input.event_name} (${existingResult.rows[0].id})`
         );
       }
 
@@ -43,10 +43,10 @@ export class InstanceService {
       }
 
       const stepsResult = await client.query(
-        `SELECT id, sequence, assignee_user_id, assignee_role
+        `SELECT id, sequence, group_sequence, approval_policy, assignee_user_id, assignee_role
          FROM workflow_template_steps
          WHERE template_id = $1
-         ORDER BY sequence ASC`,
+         ORDER BY group_sequence ASC, sequence ASC`,
         [templateResult.rows[0].id]
       );
 
@@ -68,19 +68,22 @@ export class InstanceService {
       );
 
       const instanceId = Number(instanceResult.rows[0].id);
+      const firstGroupSequence = Math.min(...stepsResult.rows.map((step) => Number(step.group_sequence)));
 
       for (const step of stepsResult.rows) {
         await client.query(
           `INSERT INTO workflow_instance_steps
-            (instance_id, template_step_id, sequence, assignee_user_id, assignee_role, status)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
+            (instance_id, template_step_id, sequence, group_sequence, approval_policy, assignee_user_id, assignee_role, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [
             instanceId,
             step.id,
             step.sequence,
+            step.group_sequence,
+            step.approval_policy,
             step.assignee_user_id,
             step.assignee_role,
-            step.sequence === 1 ? 'awaiting_action' : 'pending'
+            Number(step.group_sequence) === firstGroupSequence ? 'awaiting_action' : 'pending'
           ]
         );
       }
@@ -149,8 +152,8 @@ export class InstanceService {
         await client.query(
           `UPDATE workflow_instance_steps
            SET status = 'cancelled', updated_at = now()
-           WHERE instance_id = $1 AND status = 'pending'`,
-          [input.instance_id]
+           WHERE instance_id = $1 AND status IN ('pending', 'awaiting_action') AND id <> $2`,
+          [input.instance_id, input.step_id]
         );
         await client.query(
           `UPDATE workflow_instances
@@ -161,21 +164,35 @@ export class InstanceService {
         return;
       }
 
-      const nextStep = await client.query(
+      const waitingInCurrentGroup = await client.query(
         `SELECT id
          FROM workflow_instance_steps
+         WHERE instance_id = $1
+           AND group_sequence = $2
+           AND status = 'awaiting_action'
+         LIMIT 1`,
+        [input.instance_id, step.group_sequence]
+      );
+
+      if ((waitingInCurrentGroup.rowCount || 0) > 0) {
+        return;
+      }
+
+      const nextGroup = await client.query(
+        `SELECT group_sequence
+         FROM workflow_instance_steps
          WHERE instance_id = $1 AND status = 'pending'
-         ORDER BY sequence ASC
+         ORDER BY group_sequence ASC
          LIMIT 1`,
         [input.instance_id]
       );
 
-      if (nextStep.rowCount && nextStep.rowCount > 0) {
+      if (nextGroup.rowCount && nextGroup.rowCount > 0) {
         await client.query(
           `UPDATE workflow_instance_steps
            SET status = 'awaiting_action', updated_at = now()
-           WHERE id = $1`,
-          [nextStep.rows[0].id]
+           WHERE instance_id = $1 AND group_sequence = $2 AND status = 'pending'`,
+          [input.instance_id, nextGroup.rows[0].group_sequence]
         );
         return;
       }
@@ -217,6 +234,18 @@ export class InstanceService {
 
       await client.query("UPDATE bookings SET status = 'cancelled' WHERE id = $1", [instance.entity_id]);
       await client.query("UPDATE units SET status = 'available' WHERE id = $1", [booking.rows[0].unit_id]);
+    } else if (
+      instance?.entity_type === 'booking' &&
+      instance.trigger_event === 'booking.confirmed'
+    ) {
+      const booking = await client.query(
+        `SELECT id FROM bookings WHERE id = $1 FOR UPDATE`,
+        [instance.entity_id]
+      );
+      if (booking.rowCount === 0) {
+        throw new HttpError(404, `Booking ${instance.entity_id} not found for callback`);
+      }
+      await client.query("UPDATE bookings SET status = 'active' WHERE id = $1", [instance.entity_id]);
     }
   }
 

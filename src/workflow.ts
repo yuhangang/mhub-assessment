@@ -1,19 +1,23 @@
 import { HttpError } from './workflow/errors';
-import { TemplateStepInput } from './workflow/types';
 import { DashboardService } from './workflow/dashboard';
+import { EventService } from './workflow/events';
 import { TemplateService } from './workflow/templates';
 import { InstanceService } from './workflow/instances';
+import type { TemplateStepInput } from './workflow/types';
 
 export { HttpError };
-export { TemplateStepInput };
+export type { TemplateStepInput };
 export { validateSteps } from './workflow/templates';
 
 export class WorkflowService {
   private dashboardService = new DashboardService();
+  private eventService = new EventService();
   private templateService = new TemplateService();
   private instanceService = new InstanceService();
 
   getDashboardData = this.dashboardService.getDashboardData.bind(this.dashboardService);
+  getEvents = this.eventService.getEvents.bind(this.eventService);
+  createEvent = this.eventService.createEvent.bind(this.eventService);
   getTemplates = this.templateService.getTemplates.bind(this.templateService);
   createTemplate = this.templateService.createTemplate.bind(this.templateService);
   getTemplateById = this.templateService.getTemplateById.bind(this.templateService);
@@ -30,4 +34,3 @@ export class WorkflowService {
 }
 
 export const workflowService = new WorkflowService();
-

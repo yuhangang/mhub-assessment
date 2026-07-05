@@ -9,7 +9,7 @@ export function createApp() {
 
   app.use(cors());
   app.use(express.json());
-  app.use(express.static(path.join(process.cwd(), 'public')));
+  app.use(express.static(path.join(process.cwd(), 'out')));
 
   app.get('/health', async (_req, res) => {
     try {

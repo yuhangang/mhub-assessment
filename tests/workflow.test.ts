@@ -33,6 +33,16 @@ describe('workflow engine', () => {
       ON workflow_templates(previous_template_id)
       WHERE previous_template_id IS NOT NULL
     `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_template_parallel_unique_role
+      ON workflow_template_steps(template_id, group_sequence, assignee_role)
+      WHERE assignee_role IS NOT NULL
+    `);
+    await query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_template_parallel_unique_user
+      ON workflow_template_steps(template_id, group_sequence, assignee_user_id)
+      WHERE assignee_user_id IS NOT NULL
+    `);
   });
 
   beforeEach(async () => {
@@ -53,7 +63,10 @@ describe('workflow engine', () => {
       INSERT INTO agents (name, email, role) VALUES
         ('Sarah Sales', 'sarah@example.com', 'sales_manager'),
         ('Farid Finance', 'farid@example.com', 'finance_manager'),
-        ('Carmen Coordinator', 'carmen@example.com', 'sales_coordinator');
+        ('Carmen Coordinator', 'carmen@example.com', 'sales_coordinator'),
+        ('Aisha Sales Manager', 'aisha@example.com', 'sales_manager'),
+        ('Daniel Finance', 'daniel@example.com', 'finance_manager'),
+        ('Mei Coordinator', 'mei@example.com', 'sales_coordinator');
       INSERT INTO bookings (unit_id, agent_id, buyer_name, status) VALUES
         (1, 3, 'Buyer One', 'active'),
         (2, 3, 'Buyer Two', 'pending'),
@@ -62,13 +75,20 @@ describe('workflow engine', () => {
         (5, 3, 'Buyer Five', 'pending');
       INSERT INTO workflow_events (name, description) VALUES
         ('booking.cancellation_requested', 'Booking cancellation approval'),
+        ('booking.confirmed', 'Booking confirmation approval'),
         ('unit.price_updated', 'Unit price update approval');
       INSERT INTO workflow_templates (name, description, trigger_event, is_active)
-      VALUES ('Booking Cancellation Approval', 'Sales then finance approval', 'booking.cancellation_requested', true);
-      INSERT INTO workflow_template_steps (template_id, sequence, assignee_role)
-      VALUES (1, 1, 'sales_manager');
-      INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id)
-      VALUES (1, 2, 2);
+      VALUES 
+        ('Booking Cancellation Approval', 'Sales then finance approval', 'booking.cancellation_requested', true),
+        ('Booking Confirmation Approval', 'Sales coordinator check followed by sales manager final approval.', 'booking.confirmed', true);
+      INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+      VALUES (1, 1, 1, 'sales_manager');
+      INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_user_id)
+      VALUES (1, 2, 2, 2);
+      INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+      VALUES (2, 1, 1, 'sales_coordinator');
+      INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+      VALUES (2, 2, 2, 'sales_manager');
     `);
   });
 
@@ -97,6 +117,19 @@ describe('workflow engine', () => {
       .expect(409);
 
     expect(duplicate.body.error).toContain('already has an active workflow instance');
+  });
+
+  test('allows different workflows to run concurrently for the same entity', async () => {
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.cancellation_requested', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
+
+    // Should be allowed because it is a different event type
+    await request(app)
+      .post('/api/instances')
+      .send({ event_name: 'booking.confirmed', entity_type: 'booking', entity_id: '1', initiated_by: 3 })
+      .expect(201);
   });
 
   test('approves sequential steps and runs booking cancellation callback on final approval', async () => {
@@ -219,7 +252,7 @@ describe('workflow engine', () => {
       })
       .expect(200);
 
-    expect(Number(revision.body.id)).toBe(2);
+    expect(Number(revision.body.id)).toBe(3);
     expect(revision.body.version).toBe(2);
     expect(Number(revision.body.previous_template_id)).toBe(1);
     expect(revision.body.is_active).toBe(true);
@@ -235,7 +268,8 @@ describe('workflow engine', () => {
       previous_template_id: template.previous_template_id === null ? null : Number(template.previous_template_id)
     }))).toEqual([
       expect.objectContaining({ id: 1, is_active: false, version: 1, previous_template_id: null }),
-      expect.objectContaining({ id: 2, is_active: true, version: 2, previous_template_id: 1 })
+      expect.objectContaining({ id: 2, is_active: true, version: 1, previous_template_id: null }),
+      expect.objectContaining({ id: 3, is_active: true, version: 2, previous_template_id: 1 })
     ]);
 
     const oldInstanceSteps = await query(
@@ -258,7 +292,7 @@ describe('workflow engine', () => {
        WHERE wi.id = $1 AND wis.sequence = 1`,
       [newWorkflow.body.instance_id]
     );
-    expect(Number(newInstance.rows[0].template_id)).toBe(2);
+    expect(Number(newInstance.rows[0].template_id)).toBe(3);
     expect(newInstance.rows[0].assignee_role).toBe('finance_manager');
   });
 
@@ -334,6 +368,60 @@ describe('workflow engine', () => {
     expect(instance.body.status).toBe('approved');
   });
 
+  test('rejects duplicate role assignees in the same parallel group', async () => {
+    const response = await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Duplicate Role Parallel Approval',
+        description: 'Invalid parallel group',
+        trigger_event: 'unit.price_updated',
+        is_active: true,
+        steps: [
+          { sequence: 1, group_sequence: 1, assignee_role: 'sales_manager' },
+          { sequence: 2, group_sequence: 1, assignee_role: 'sales_manager' }
+        ]
+      })
+      .expect(400);
+
+    expect(response.body.error).toBe('parallel steps in the same group must use different roles or different users');
+  });
+
+  test('rejects duplicate user assignees in the same parallel group', async () => {
+    const response = await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Duplicate User Parallel Approval',
+        description: 'Invalid parallel group',
+        trigger_event: 'unit.price_updated',
+        is_active: true,
+        steps: [
+          { sequence: 1, group_sequence: 1, assignee_user_id: 2 },
+          { sequence: 2, group_sequence: 1, assignee_user_id: 2 }
+        ]
+      })
+      .expect(400);
+
+    expect(response.body.error).toBe('parallel steps in the same group must use different roles or different users');
+  });
+
+  test('allows the same role or user in different approval groups', async () => {
+    await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Repeated Approver Across Groups',
+        description: 'Valid sequential reuse',
+        trigger_event: 'unit.price_updated',
+        is_active: true,
+        steps: [
+          { sequence: 1, group_sequence: 1, assignee_role: 'sales_manager' },
+          { sequence: 2, group_sequence: 2, assignee_role: 'sales_manager' },
+          { sequence: 3, group_sequence: 3, assignee_user_id: 2 },
+          { sequence: 4, group_sequence: 4, assignee_user_id: 2 }
+        ]
+      })
+      .expect(201);
+  });
+
   test('dashboard payload includes workflow events for template settings', async () => {
     const response = await request(app).get('/api/dashboard').expect(200);
 
@@ -349,6 +437,70 @@ describe('workflow engine', () => {
         })
       ])
     );
+  });
+
+  test('creates a workflow event and uses it for a new template', async () => {
+    const createdEvent = await request(app)
+      .post('/api/events')
+      .send({
+        name: 'booking.refund_requested',
+        description: 'Booking refund approval'
+      })
+      .expect(201);
+
+    expect(createdEvent.body).toMatchObject({
+      name: 'booking.refund_requested',
+      description: 'Booking refund approval',
+      is_enabled: true
+    });
+
+    const events = await request(app).get('/api/events').expect(200);
+    expect(events.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'booking.refund_requested' })
+      ])
+    );
+
+    await request(app)
+      .post('/api/templates')
+      .send({
+        name: 'Booking Refund Approval',
+        description: 'Finance approval for refund requests',
+        trigger_event: 'booking.refund_requested',
+        is_active: true,
+        steps: [{ sequence: 1, assignee_role: 'finance_manager' }]
+      })
+      .expect(201);
+
+    await request(app)
+      .post('/api/instances')
+      .send({
+        event_name: 'booking.refund_requested',
+        entity_type: 'booking',
+        entity_id: '2',
+        initiated_by: 3
+      })
+      .expect(201);
+  });
+
+  test('rejects invalid or duplicate workflow events', async () => {
+    await request(app)
+      .post('/api/events')
+      .send({
+        name: 'Booking Confirmed',
+        description: 'Invalid display label'
+      })
+      .expect(400);
+
+    const duplicate = await request(app)
+      .post('/api/events')
+      .send({
+        name: 'booking.confirmed',
+        description: 'Duplicate event'
+      })
+      .expect(409);
+
+    expect(duplicate.body.error).toBe("Workflow event 'booking.confirmed' already exists");
   });
 
   test('soft deletes an unused template and hides it from template settings', async () => {

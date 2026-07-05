@@ -17,7 +17,10 @@ INSERT INTO units (project_id, unit_number, status, price_cents) VALUES
 INSERT INTO agents (name, email, role) VALUES
   ('Sarah Sales', 'sarah@example.com', 'sales_manager'),
   ('Farid Finance', 'farid@example.com', 'finance_manager'),
-  ('Carmen Coordinator', 'carmen@example.com', 'sales_coordinator');
+  ('Carmen Coordinator', 'carmen@example.com', 'sales_coordinator'),
+  ('Aisha Sales Manager', 'aisha@example.com', 'sales_manager'),
+  ('Daniel Finance', 'daniel@example.com', 'finance_manager'),
+  ('Mei Coordinator', 'mei@example.com', 'sales_coordinator');
 
 INSERT INTO bookings (unit_id, agent_id, buyer_name, status) VALUES
   (1, 3, 'Buyer One', 'active'),
@@ -34,9 +37,17 @@ INSERT INTO workflow_events (name, description) VALUES
 INSERT INTO workflow_templates (name, description, trigger_event, is_active)
 VALUES ('Booking Cancellation Approval', 'Sales manager approval followed by finance sign-off.', 'booking.cancellation_requested', true);
 
-INSERT INTO workflow_template_steps (template_id, sequence, assignee_role)
-VALUES (1, 1, 'sales_manager');
+INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+VALUES (1, 1, 1, 'sales_manager');
 
-INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id)
-VALUES (1, 2, 2);
+INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_user_id)
+VALUES (1, 2, 2, 2);
 
+INSERT INTO workflow_templates (name, description, trigger_event, is_active)
+VALUES ('Booking Confirmation Approval', 'Sales coordinator check followed by sales manager final approval.', 'booking.confirmed', true);
+
+INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+VALUES (2, 1, 1, 'sales_coordinator');
+
+INSERT INTO workflow_template_steps (template_id, sequence, group_sequence, assignee_role)
+VALUES (2, 2, 2, 'sales_manager');

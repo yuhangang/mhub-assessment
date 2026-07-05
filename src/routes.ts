@@ -4,8 +4,8 @@ import { HttpError, workflowService } from './workflow';
 const router = Router();
 
 function toHttpError(error: unknown): { status: number; message: string } {
-  if (error instanceof HttpError) {
-    return { status: error.status, message: error.message };
+  if (error && typeof error === 'object' && 'status' in error && typeof (error as any).status === 'number') {
+    return { status: (error as any).status, message: (error as any).message || 'HTTP error' };
   }
   if (error && typeof error === 'object' && 'code' in error && (error as any).code === '23505') {
     return { status: 409, message: 'Request violates a unique workflow constraint' };
@@ -33,6 +33,20 @@ function asyncRoute(handler: (req: Request, res: Response) => Promise<Response |
 router.get('/dashboard', asyncRoute(async (_req, res) => {
   const data = await workflowService.getDashboardData();
   res.json(data);
+}));
+
+router.get('/events', asyncRoute(async (_req, res) => {
+  const events = await workflowService.getEvents();
+  res.json(events);
+}));
+
+router.post('/events', asyncRoute(async (req, res) => {
+  const event = await workflowService.createEvent({
+    name: req.body.name,
+    description: req.body.description,
+    is_enabled: req.body.is_enabled
+  });
+  res.status(201).json(event);
 }));
 
 router.get('/templates', asyncRoute(async (_req, res) => {

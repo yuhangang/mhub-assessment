@@ -7,6 +7,8 @@ export function validateSteps(steps: unknown): asserts steps is TemplateStepInpu
     throw new HttpError(400, 'steps must be a non-empty array');
   }
 
+  const assigneesByGroup = new Map<string, { roles: Set<string>; users: Set<string> }>();
+
   for (const step of steps) {
     if (!step || typeof step !== 'object') {
       throw new HttpError(400, 'each step must be an object');
@@ -16,6 +18,39 @@ export function validateSteps(steps: unknown): asserts steps is TemplateStepInpu
     if (!Number.isInteger(Number(candidate.sequence)) || Number(candidate.sequence) <= 0) {
       throw new HttpError(400, 'step sequence must be a positive integer');
     }
+    if (
+      candidate.group_sequence !== undefined &&
+      (!Number.isInteger(Number(candidate.group_sequence)) || Number(candidate.group_sequence) <= 0)
+    ) {
+      throw new HttpError(400, 'step group_sequence must be a positive integer');
+    }
+    if (candidate.approval_policy !== undefined && candidate.approval_policy !== 'ALL') {
+      throw new HttpError(400, "approval_policy must be 'ALL'");
+    }
+
+    const groupSequence = Number(candidate.group_sequence ?? candidate.sequence);
+    const groupAssignees = assigneesByGroup.get(String(groupSequence)) ?? {
+      roles: new Set<string>(),
+      users: new Set<string>()
+    };
+
+    if (candidate.assignee_role) {
+      const role = String(candidate.assignee_role);
+      if (groupAssignees.roles.has(role)) {
+        throw new HttpError(400, 'parallel steps in the same group must use different roles or different users');
+      }
+      groupAssignees.roles.add(role);
+    }
+
+    if (candidate.assignee_user_id) {
+      const userId = String(candidate.assignee_user_id);
+      if (groupAssignees.users.has(userId)) {
+        throw new HttpError(400, 'parallel steps in the same group must use different roles or different users');
+      }
+      groupAssignees.users.add(userId);
+    }
+
+    assigneesByGroup.set(String(groupSequence), groupAssignees);
   }
 }
 
@@ -63,9 +98,17 @@ export class TemplateService {
 
       for (const step of steps) {
         await client.query(
-          `INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role)
-           VALUES ($1, $2, $3, $4)`,
-          [template.rows[0].id, step.sequence, step.assignee_user_id || null, step.assignee_role || null]
+          `INSERT INTO workflow_template_steps
+             (template_id, sequence, group_sequence, approval_policy, assignee_user_id, assignee_role)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            template.rows[0].id,
+            Number(step.sequence),
+            Number(step.group_sequence ?? step.sequence),
+            step.approval_policy ?? 'ALL',
+            step.assignee_user_id || null,
+            step.assignee_role || null
+          ]
         );
       }
 
@@ -123,7 +166,7 @@ export class TemplateService {
       const revisionSteps = steps !== undefined
         ? steps
         : (await client.query(
-            `SELECT sequence, assignee_user_id, assignee_role
+            `SELECT sequence, group_sequence, approval_policy, assignee_user_id, assignee_role
              FROM workflow_template_steps
              WHERE template_id = $1
              ORDER BY sequence ASC`,
@@ -158,11 +201,14 @@ export class TemplateService {
 
       for (const step of revisionSteps) {
         await client.query(
-          `INSERT INTO workflow_template_steps (template_id, sequence, assignee_user_id, assignee_role)
-           VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO workflow_template_steps
+             (template_id, sequence, group_sequence, approval_policy, assignee_user_id, assignee_role)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
           [
             inserted.rows[0].id,
             Number(step.sequence),
+            Number(step.group_sequence ?? step.sequence),
+            step.approval_policy ?? 'ALL',
             step.assignee_user_id || null,
             step.assignee_role || null
           ]
